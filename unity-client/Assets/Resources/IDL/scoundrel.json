@@ -1,0 +1,579 @@
+{
+  "address": "7r9dGYN2WiNKgr7wD89Heh4rrWX1zkGhxs8ckjKfbNQx",
+  "metadata": {
+    "name": "scoundrel",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Created with Anchor"
+  },
+  "instructions": [
+    {
+      "name": "claim_spoils",
+      "discriminator": [
+        132,
+        55,
+        110,
+        6,
+        235,
+        211,
+        149,
+        45
+      ],
+      "accounts": [
+        {
+          "name": "signer",
+          "signer": true
+        },
+        {
+          "name": "dungeon_run",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  117,
+                  110,
+                  103,
+                  101,
+                  111,
+                  110,
+                  95,
+                  114,
+                  117,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "dungeon_run.player",
+                "account": "DungeonRun"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "choice",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "close_run",
+      "discriminator": [
+        31,
+        61,
+        130,
+        76,
+        74,
+        147,
+        171,
+        204
+      ],
+      "accounts": [
+        {
+          "name": "player",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "dungeon_run"
+          ]
+        },
+        {
+          "name": "dungeon_run",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  117,
+                  110,
+                  103,
+                  101,
+                  111,
+                  110,
+                  95,
+                  114,
+                  117,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "flee_room",
+      "discriminator": [
+        67,
+        216,
+        47,
+        229,
+        176,
+        138,
+        203,
+        97
+      ],
+      "accounts": [
+        {
+          "name": "signer",
+          "signer": true
+        },
+        {
+          "name": "dungeon_run",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  117,
+                  110,
+                  103,
+                  101,
+                  111,
+                  110,
+                  95,
+                  114,
+                  117,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "dungeon_run.player",
+                "account": "DungeonRun"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "resolve_card",
+      "discriminator": [
+        7,
+        249,
+        238,
+        138,
+        126,
+        35,
+        54,
+        92
+      ],
+      "accounts": [
+        {
+          "name": "signer",
+          "signer": true
+        },
+        {
+          "name": "dungeon_run",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  117,
+                  110,
+                  103,
+                  101,
+                  111,
+                  110,
+                  95,
+                  114,
+                  117,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "dungeon_run.player",
+                "account": "DungeonRun"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "slot_index",
+          "type": "u8"
+        },
+        {
+          "name": "use_weapon",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "start_run",
+      "discriminator": [
+        72,
+        212,
+        1,
+        91,
+        61,
+        186,
+        2,
+        52
+      ],
+      "accounts": [
+        {
+          "name": "player",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "session_signer"
+        },
+        {
+          "name": "dungeon_run",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  117,
+                  110,
+                  103,
+                  101,
+                  111,
+                  110,
+                  95,
+                  114,
+                  117,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "player"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "seed",
+          "type": "u64"
+        },
+        {
+          "name": "has_legendary_nft",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "use_epic_potion",
+      "discriminator": [
+        80,
+        220,
+        203,
+        172,
+        136,
+        53,
+        36,
+        231
+      ],
+      "accounts": [
+        {
+          "name": "signer",
+          "signer": true
+        },
+        {
+          "name": "dungeon_run",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  117,
+                  110,
+                  103,
+                  101,
+                  111,
+                  110,
+                  95,
+                  114,
+                  117,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "dungeon_run.player",
+                "account": "DungeonRun"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    }
+  ],
+  "accounts": [
+    {
+      "name": "DungeonRun",
+      "discriminator": [
+        105,
+        118,
+        160,
+        69,
+        75,
+        241,
+        13,
+        36
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "LegendarySkinUnlocked",
+      "discriminator": [
+        121,
+        75,
+        252,
+        234,
+        60,
+        87,
+        23,
+        238
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "InvalidCardId",
+      "msg": "Invalid card ID outside 0..=43 range."
+    },
+    {
+      "code": 6001,
+      "name": "DeckOverflow",
+      "msg": "Deck capacity exceeded."
+    },
+    {
+      "code": 6002,
+      "name": "RunNotActive",
+      "msg": "The dungeon run is no longer active."
+    },
+    {
+      "code": 6003,
+      "name": "UnauthorizedSigner",
+      "msg": "Signer is neither the player nor the authorized session key."
+    },
+    {
+      "code": 6004,
+      "name": "CannotFleeMidRoom",
+      "msg": "Cannot flee a room after resolving cards in it."
+    },
+    {
+      "code": 6005,
+      "name": "CannotFleeConsecutiveRooms",
+      "msg": "Cannot flee two rooms in a row."
+    },
+    {
+      "code": 6006,
+      "name": "PendingSpoilsMustBeClaimed",
+      "msg": "Must claim pending room spoils before continuing."
+    },
+    {
+      "code": 6007,
+      "name": "NoEpicPotionsAvailable",
+      "msg": "No Epic Health Potions available in inventory."
+    },
+    {
+      "code": 6008,
+      "name": "EpicPotionAlreadyActive",
+      "msg": "Epic Health Potion buff is already active."
+    },
+    {
+      "code": 6009,
+      "name": "InvalidSlotIndex",
+      "msg": "Room slot index must be 0..=3."
+    },
+    {
+      "code": 6010,
+      "name": "EmptyRoomSlot",
+      "msg": "Selected room slot is already empty."
+    },
+    {
+      "code": 6011,
+      "name": "NoWeaponEquipped",
+      "msg": "Cannot attack with weapon when barehanded."
+    },
+    {
+      "code": 6012,
+      "name": "WeaponCeilingExceeded",
+      "msg": "Monster rank exceeds current weapon ceiling."
+    },
+    {
+      "code": 6013,
+      "name": "NoSpoilsToClaim",
+      "msg": "No pending spoils to claim."
+    },
+    {
+      "code": 6014,
+      "name": "InvalidSpoilsChoice",
+      "msg": "Invalid spoils choice for the current threat tier."
+    }
+  ],
+  "types": [
+    {
+      "name": "DungeonRun",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "session_signer",
+            "type": "pubkey"
+          },
+          {
+            "name": "deck",
+            "type": {
+              "array": [
+                "u8",
+                44
+              ]
+            }
+          },
+          {
+            "name": "deck_head",
+            "type": "u8"
+          },
+          {
+            "name": "deck_len",
+            "type": "u8"
+          },
+          {
+            "name": "room",
+            "type": {
+              "array": [
+                {
+                  "option": "u8"
+                },
+                4
+              ]
+            }
+          },
+          {
+            "name": "cards_resolved_in_room",
+            "type": "u8"
+          },
+          {
+            "name": "hp_tenths",
+            "type": "u16"
+          },
+          {
+            "name": "max_hp_tenths",
+            "type": "u16"
+          },
+          {
+            "name": "equipped_weapon_rank",
+            "type": "u8"
+          },
+          {
+            "name": "weapon_ceiling",
+            "type": "u8"
+          },
+          {
+            "name": "legendary_forged_edge_charges",
+            "type": "u8"
+          },
+          {
+            "name": "has_legendary_skin",
+            "type": "bool"
+          },
+          {
+            "name": "potion_used_this_room",
+            "type": "bool"
+          },
+          {
+            "name": "first_potion_healed_tenths",
+            "type": "u16"
+          },
+          {
+            "name": "epic_potions_inventory",
+            "type": "u8"
+          },
+          {
+            "name": "epic_potion_buff_rooms_left",
+            "type": "u8"
+          },
+          {
+            "name": "fled_last_room",
+            "type": "bool"
+          },
+          {
+            "name": "room_threat_accumulator",
+            "type": "u8"
+          },
+          {
+            "name": "pending_spoils_threat",
+            "type": "u8"
+          },
+          {
+            "name": "unclaimed_gold",
+            "type": "u32"
+          },
+          {
+            "name": "score",
+            "type": "i32"
+          },
+          {
+            "name": "run_status",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "LegendarySkinUnlocked",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "threat_score",
+            "type": "u8"
+          }
+        ]
+      }
+    }
+  ]
+}
