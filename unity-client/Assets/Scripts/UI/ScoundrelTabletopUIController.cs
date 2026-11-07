@@ -12,6 +12,7 @@ namespace Scoundrel
         [SerializeField] private ScoundrelGameManager gameManager;
         [SerializeField] private SpoilsModalUI spoilsModal;
         [SerializeField] private MarketplaceModalUI marketplaceModal;
+        [SerializeField] private WalletConnectModalUI walletConnectModal;
         [SerializeField] private Material sharedFoilMaterial;
         [SerializeField] private RectTransform animationLayer;
 
@@ -23,6 +24,7 @@ namespace Scoundrel
         [SerializeField] private TextMeshProUGUI epicEchoBadgeText;
         [SerializeField] private TextMeshProUGUI goldValueText;
         [SerializeField] private TextMeshProUGUI sessionStatusText;
+        [SerializeField] private Button openWalletModalButton;
         [SerializeField] private Button openMarketButton;
         [SerializeField] private Button avoidRoomButton;
         [SerializeField] private TextMeshProUGUI avoidRoomButtonText;
@@ -215,6 +217,12 @@ namespace Scoundrel
             useRustyShieldButtonText = shieldUseBtnText;
         }
 
+        public void ConfigureWalletModal(WalletConnectModalUI walletModal, Button walletBtn)
+        {
+            walletConnectModal = walletModal;
+            openWalletModalButton = walletBtn;
+        }
+
         private void Awake()
         {
             if (gameManager == null)
@@ -268,6 +276,12 @@ namespace Scoundrel
 
         private void WireButtons()
         {
+            if (openWalletModalButton != null)
+            {
+                openWalletModalButton.onClick.RemoveAllListeners();
+                openWalletModalButton.onClick.AddListener(OnOpenWalletModalClicked);
+            }
+
             if (openMarketButton != null)
             {
                 openMarketButton.onClick.RemoveAllListeners();
@@ -354,6 +368,11 @@ namespace Scoundrel
             if (marketplaceModal != null)
             {
                 marketplaceModal.Bind(gameManager);
+            }
+
+            if (walletConnectModal != null)
+            {
+                walletConnectModal.Bind(gameManager);
             }
         }
 
@@ -471,10 +490,15 @@ namespace Scoundrel
                 }
             }
 
-            // 3. Accumulated SPL Gold
+            // 3. Accumulated SPL Gold (Unclaimed in Run + Minted in ATA)
             if (goldValueText != null)
             {
-                goldValueText.text = $"SPL Gold: {state.UnclaimedGold}";
+                ulong minted = (gameManager != null && gameManager.Bridge != null)
+                    ? gameManager.Bridge.LastKnownMintedGoldBalance
+                    : 0UL;
+                goldValueText.text = minted > 0
+                    ? $"SPL Gold: {state.UnclaimedGold} ({minted} ATA)"
+                    : $"SPL Gold: {state.UnclaimedGold}";
             }
 
             // 4. Session Key Status
@@ -1010,6 +1034,14 @@ namespace Scoundrel
             }
         }
 
+        private void OnOpenWalletModalClicked()
+        {
+            if (walletConnectModal != null)
+            {
+                walletConnectModal.ShowModal();
+            }
+        }
+
         private void OnOpenMarketClicked()
         {
             if (marketplaceModal != null)
@@ -1108,6 +1140,18 @@ namespace Scoundrel
             {
                 marketplaceModal.HideImmediate();
             }
+            if (walletConnectModal != null)
+            {
+                walletConnectModal.HideImmediate();
+            }
+
+            DungeonRunState stSnapshot = gameManager != null ? gameManager.State : null;
+            uint runGoldLooted = stSnapshot != null ? stSnapshot.UnclaimedGold : 0;
+            if (runGoldLooted > 0 && gameManager != null)
+            {
+                // Automatically mint accumulated unclaimed_gold into the player's SPL Gold ATA on run completion
+                gameManager.TryMintGoldTokens();
+            }
 
             DOVirtual.DelayedCall(0.45f, () =>
             {
@@ -1124,7 +1168,9 @@ namespace Scoundrel
                 }
 
                 DungeonRunState st = gameManager != null ? gameManager.State : null;
-                uint gold = st != null ? st.UnclaimedGold : 0;
+                ulong totalMinted = (gameManager != null && gameManager.Bridge != null)
+                    ? gameManager.Bridge.LastKnownMintedGoldBalance
+                    : (ulong)runGoldLooted;
 
                 if (gameOverTitleText != null)
                 {
@@ -1138,7 +1184,7 @@ namespace Scoundrel
                 {
                     gameOverSubtitleText.text =
                         $"Official Scoundrel Score: {finalScore}\n" +
-                        $"SPL Gold Looted: {gold}\n" +
+                        $"SPL Gold Minted to ATA: +{runGoldLooted} (Total ATA: {totalMinted})\n" +
                         $"Remaining HP: {(st != null ? st.FormatHpText() : "0.0 / 20 HP")}";
                 }
             });
@@ -1176,6 +1222,10 @@ namespace Scoundrel
             if (marketplaceModal != null)
             {
                 marketplaceModal.HideImmediate();
+            }
+            if (walletConnectModal != null)
+            {
+                walletConnectModal.HideImmediate();
             }
 
             // Clean up all tabletop card visuals before fresh deal

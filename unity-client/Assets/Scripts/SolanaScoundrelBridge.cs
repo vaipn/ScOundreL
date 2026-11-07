@@ -26,16 +26,22 @@ namespace Scoundrel
         private static readonly byte[] DiscUseEpicPotion = { 80, 220, 203, 172, 136, 53, 36, 231 };
         private static readonly byte[] DiscResolveCard = { 7, 249, 238, 138, 126, 35, 54, 92 };
         private static readonly byte[] DiscClaimSpoils = { 132, 55, 110, 6, 235, 211, 149, 45 };
+        private static readonly byte[] DiscClaimGoldTokens = { 168, 50, 230, 68, 223, 73, 86, 21 };
         private static readonly byte[] DiscCloseRun = { 31, 61, 130, 76, 74, 147, 171, 204 };
         private static readonly byte[] DiscDungeonRunAccount = { 105, 118, 160, 69, 75, 241, 13, 36 };
 
         private static readonly byte[] DungeonRunSeedPrefix = Encoding.UTF8.GetBytes("dungeon_run");
         private static readonly byte[] ProgramIdentitySeedPrefix = Encoding.UTF8.GetBytes("identity");
+        private static readonly byte[] GoldMintSeedPrefix = Encoding.UTF8.GetBytes("scoundrel_gold_mint");
+
+        private const string BurnerWalletPrefsKey = "Scoundrel_DevnetBurnerPrivateKeyBase64";
 
         // MagicBlock VRF Program & Default Queue Constants (from ephemeral-vrf-sdk 0.17.3)
         public const string DefaultVrfQueueAddress = "Cuj97ggrhhidhbu39TijNVqE74xvKJ69gDervRUXAxGh";
         public const string VrfProgramAddress = "Vrf1RNUjXmQGjmQrQLvJHs9SNkvDJEsRVFPkfSQUwGz";
         public const string SlotHashesSysvarAddress = "SysvarS1otHashes111111111111111111111111111";
+        public const string SplTokenProgramAddress = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+        public const string AssociatedTokenProgramAddress = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 
         private const int ConfirmationMaxAttempts = 60;
         private const int ConfirmationPollDelayMs = 250;
@@ -53,14 +59,22 @@ namespace Scoundrel
             set => offlineSimulationMode = value;
         }
 
+        public string RpcUrl => rpcUrl;
+        public string ProgramId => programId;
         public string ActiveSessionPubkey { get; private set; } = string.Empty;
         public string ActivePlayerPubkey { get; private set; } = string.Empty;
         public string DungeonRunPdaAddress { get; private set; } = string.Empty;
+        public string GoldMintPdaAddress { get; private set; } = string.Empty;
+        public string PlayerGoldAtaAddress { get; private set; } = string.Empty;
+        public double LastKnownSolBalance { get; private set; }
+        public ulong LastKnownMintedGoldBalance { get; private set; }
+        public bool HasConnectedWallet => ResolveConnectedPlayerAccount() != null;
         public string LastStatusMessage { get; private set; } = "Session Key Ready (Local VRF Sim)";
         public string LastTransactionSignature { get; private set; } = string.Empty;
         public int SettledTransactionCount { get; private set; }
 
         public event Action<string> OnBridgeStatusChanged;
+        public event Action OnWalletStateChanged;
 
         private readonly SemaphoreSlim _txMutex = new SemaphoreSlim(1, 1);
         private CancellationTokenSource _lifecycleCts;
@@ -103,6 +117,228 @@ namespace Scoundrel
                 {
                     _dungeonRunPda = pda;
                     DungeonRunPdaAddress = pda.Key;
+                }
+                if (TryDeriveGoldMintPda(progKey, out PublicKey goldMint, out _))
+                {
+                    GoldMintPdaAddress = goldMint.Key;
+                    if (TryDeriveAssociatedTokenAddress(playerAccount.PublicKey, goldMint, out PublicKey ata))
+                    {
+                        PlayerGoldAtaAddress = ata.Key;
+                    }
+                }
+            }
+            OnWalletStateChanged?.Invoke();
+        }
+
+        public void SetNetworkMode(bool offlineSim)
+        {
+            offlineSimulationMode = offlineSim;
+            if (offlineSim)
+            {
+                EmitStatus("Session Key Ready • Local VRF Sim");
+            }
+            else if (HasConnectedWallet)
+            {
+                EmitStatus($"Devnet Live • Wallet ({ShortKey(ActivePlayerPubkey)})");
+                _ = RefreshBalancesAsync();
+            }
+            else
+            {
+                EmitStatus("Devnet Mode • Connect Wallet to Sign");
+            }
+            OnWalletStateChanged?.Invoke();
+        }
+
+        public async Task<bool> ConnectWalletAdapterAsync()
+        {
+            try
+            {
+                EmitStatus("Connecting Solana Wallet Adapter...");
+                Account acct = null;
+                if (Web3.Instance != null)
+                {
+                    acct = await Web3.Instance.LoginWalletAdapter();
+                }
+
+                if (acct == null)
+                {
+                    // Fallback to in-game wallet or Devnet burner if Wallet Adapter plugin is unavailable in Editor
+                    acct = LoadOrCreateDevnetBurnerAccount();
+                }
+
+                if (acct != null)
+                {
+                    _overridePlayerAccount = acct;
+                    offlineSimulationMode = false;
+                    UpdateDerivedAddressesForPlayer(acct.PublicKey);
+                    EmitStatus($"Wallet Connected • {ShortKey(acct.PublicKey.Key)} (Devnet)");
+                    OnWalletStateChanged?.Invoke();
+                    await RefreshBalancesAsync();
+                    return true;
+                }
+
+                EmitStatus("Wallet Adapter Connection Cancelled");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[SolanaScoundrelBridge] ConnectWalletAdapterAsync fallback: {ex.Message}");
+                Account burner = LoadOrCreateDevnetBurnerAccount();
+                SetPlayerAccount(burner);
+                offlineSimulationMode = false;
+                EmitStatus($"Devnet Wallet Active • {ShortKey(burner.PublicKey.Key)}");
+                await RefreshBalancesAsync();
+                return true;
+            }
+        }
+
+        public async Task<bool> ConnectDevnetBurnerWalletAsync(bool requestAirdropIfLow = false)
+        {
+            Account burner = LoadOrCreateDevnetBurnerAccount();
+            SetPlayerAccount(burner);
+            offlineSimulationMode = false;
+            EmitStatus($"Devnet Burner Ready • {ShortKey(burner.PublicKey.Key)}");
+            await RefreshBalancesAsync();
+
+            if (requestAirdropIfLow && LastKnownSolBalance < 0.05)
+            {
+                await RequestDevnetAirdropAsync(1_000_000_000UL);
+            }
+
+            return true;
+        }
+
+        public async Task<bool> RequestDevnetAirdropAsync(ulong lamports = 1_000_000_000UL)
+        {
+            EnsureLocalKeysInitialized();
+            Account targetAcct = ResolveConnectedPlayerAccount() ?? LoadOrCreateDevnetBurnerAccount();
+            SetPlayerAccount(targetAcct);
+
+            IRpcClient rpc = GetOrCreateRpcClient();
+            if (rpc == null)
+            {
+                EmitStatus("RPC Unavailable • Cannot Request Airdrop");
+                return false;
+            }
+
+            try
+            {
+                EmitStatus($"Requesting {lamports / 1_000_000_000.0:0.0} SOL Devnet Airdrop...");
+                var res = await rpc.RequestAirdropAsync(targetAcct.PublicKey.Key, lamports, Commitment.Confirmed);
+                if (res != null && res.WasSuccessful && !string.IsNullOrEmpty(res.Result))
+                {
+                    LastTransactionSignature = res.Result;
+                    await Task.Delay(1200);
+                    await RefreshBalancesAsync();
+                    EmitStatus($"Devnet Airdrop Confirmed ({ShortKey(res.Result)})");
+                    return true;
+                }
+
+                EmitStatus($"Devnet Faucet Rate-Limited • Fund {ShortKey(targetAcct.PublicKey.Key)} at faucet.solana.com");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[SolanaScoundrelBridge] RequestDevnetAirdropAsync warning: {ex.Message}");
+                EmitStatus($"Devnet Faucet Busy • Fund {ShortKey(targetAcct.PublicKey.Key)}");
+                return false;
+            }
+        }
+
+        public async Task RefreshBalancesAsync()
+        {
+            EnsureLocalKeysInitialized();
+            Account player = ResolveConnectedPlayerAccount() ?? EnsureLocalSimPlayerAccount();
+            UpdateDerivedAddressesForPlayer(player.PublicKey);
+
+            if (offlineSimulationMode)
+            {
+                OnWalletStateChanged?.Invoke();
+                return;
+            }
+
+            IRpcClient rpc = GetOrCreateRpcClient();
+            if (rpc == null) return;
+
+            try
+            {
+                var balRes = await rpc.GetBalanceAsync(player.PublicKey.Key, Commitment.Confirmed);
+                if (balRes != null && balRes.WasSuccessful && balRes.Result != null)
+                {
+                    LastKnownSolBalance = balRes.Result.Value / 1_000_000_000.0;
+                }
+
+                if (!string.IsNullOrEmpty(PlayerGoldAtaAddress))
+                {
+                    var tokRes = await rpc.GetTokenAccountBalanceAsync(PlayerGoldAtaAddress, Commitment.Confirmed);
+                    if (tokRes != null && tokRes.WasSuccessful && tokRes.Result?.Value != null)
+                    {
+                        if (ulong.TryParse(tokRes.Result.Value.Amount, out ulong parsedGold))
+                        {
+                            LastKnownMintedGoldBalance = parsedGold;
+                        }
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // Ignore transient RPC polling errors
+            }
+
+            OnWalletStateChanged?.Invoke();
+        }
+
+        private Account LoadOrCreateDevnetBurnerAccount()
+        {
+            try
+            {
+                if (PlayerPrefs.HasKey(BurnerWalletPrefsKey))
+                {
+                    string b64 = PlayerPrefs.GetString(BurnerWalletPrefsKey, string.Empty);
+                    if (!string.IsNullOrEmpty(b64))
+                    {
+                        byte[] raw = Convert.FromBase64String(b64);
+                        if (raw.Length == 64)
+                        {
+                            byte[] pub = new byte[32];
+                            Buffer.BlockCopy(raw, 32, pub, 0, 32);
+                            return new Account(raw, pub);
+                        }
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // Regenerate below if corrupted
+            }
+
+            Account fresh = new Account();
+            if (fresh.PrivateKey?.KeyBytes != null && fresh.PrivateKey.KeyBytes.Length == 64)
+            {
+                PlayerPrefs.SetString(BurnerWalletPrefsKey, Convert.ToBase64String(fresh.PrivateKey.KeyBytes));
+                PlayerPrefs.Save();
+            }
+            return fresh;
+        }
+
+        private void UpdateDerivedAddressesForPlayer(PublicKey playerPubKey)
+        {
+            if (playerPubKey == null) return;
+            ActivePlayerPubkey = playerPubKey.Key;
+            if (TryGetProgramPublicKey(out PublicKey progKey))
+            {
+                if (TryDeriveDungeonRunPda(playerPubKey, progKey, out PublicKey pda, out _))
+                {
+                    _dungeonRunPda = pda;
+                    DungeonRunPdaAddress = pda.Key;
+                }
+                if (TryDeriveGoldMintPda(progKey, out PublicKey goldMint, out _))
+                {
+                    GoldMintPdaAddress = goldMint.Key;
+                    if (TryDeriveAssociatedTokenAddress(playerPubKey, goldMint, out PublicKey ata))
+                    {
+                        PlayerGoldAtaAddress = ata.Key;
+                    }
                 }
             }
         }
@@ -148,6 +384,11 @@ namespace Scoundrel
         public void DispatchClaimSpoils(byte choice)
         {
             ObserveAsync(ClaimSpoilsAsync(choice), "claim_spoils");
+        }
+
+        public void DispatchClaimGoldTokens(uint expectedGoldAmount = 0)
+        {
+            ObserveAsync(ClaimGoldTokensAsync(expectedGoldAmount), "claim_gold_tokens");
         }
 
         public void DispatchCloseRun()
@@ -411,6 +652,126 @@ namespace Scoundrel
                 (signer, pda, prog) => BuildClaimSpoilsInstruction(signer, pda, prog, choice));
         }
 
+        public async Task<bool> ClaimGoldTokensAsync(uint simulatedOrExpectedAmount = 0)
+        {
+            EnsureLocalKeysInitialized();
+
+            if (offlineSimulationMode)
+            {
+                if (simulatedOrExpectedAmount > 0)
+                {
+                    LastKnownMintedGoldBalance += simulatedOrExpectedAmount;
+                }
+                SettledTransactionCount++;
+                EmitStatus($"SPL Gold Minted • +{simulatedOrExpectedAmount} GOLD (Local Sim)");
+                OnWalletStateChanged?.Invoke();
+                return true;
+            }
+
+            Account connectedPlayer = ResolveConnectedPlayerAccount();
+            if (connectedPlayer == null || !TryGetProgramPublicKey(out PublicKey programPubKey))
+            {
+                if (simulatedOrExpectedAmount > 0)
+                {
+                    LastKnownMintedGoldBalance += simulatedOrExpectedAmount;
+                }
+                SettledTransactionCount++;
+                EmitStatus($"SPL Gold Minted • +{simulatedOrExpectedAmount} GOLD (Sim Fallback)");
+                OnWalletStateChanged?.Invoke();
+                return true;
+            }
+
+            if (!TryDeriveDungeonRunPda(connectedPlayer.PublicKey, programPubKey, out PublicKey pda, out _) ||
+                !TryDeriveGoldMintPda(programPubKey, out PublicKey goldMint, out _) ||
+                !TryDeriveAssociatedTokenAddress(connectedPlayer.PublicKey, goldMint, out PublicKey playerAta))
+            {
+                return false;
+            }
+
+            // Use session_signer if active and funded, otherwise sign with connectedPlayer
+            bool useSessionSigner = _hasActiveOnChainSession && _sessionSigner != null;
+            Account feePayerAccount = useSessionSigner ? _sessionSigner : connectedPlayer;
+
+            CancellationToken ct = _lifecycleCts != null ? _lifecycleCts.Token : CancellationToken.None;
+            await _txMutex.WaitAsync(ct);
+            try
+            {
+                IRpcClient rpc = GetOrCreateRpcClient();
+                if (rpc == null)
+                {
+                    return false;
+                }
+
+                var blockhashRes = await rpc.GetLatestBlockHashAsync(Commitment.Confirmed);
+                string recentBlockhash = blockhashRes?.Result?.Value?.Blockhash;
+                if (blockhashRes == null || !blockhashRes.WasSuccessful || string.IsNullOrEmpty(recentBlockhash))
+                {
+                    EmitStatus("RPC Offline • Could Not Mint SPL Gold");
+                    return false;
+                }
+
+                TransactionInstruction ix = BuildClaimGoldTokensInstruction(
+                    feePayerAccount.PublicKey,
+                    connectedPlayer.PublicKey,
+                    pda,
+                    goldMint,
+                    playerAta,
+                    programPubKey);
+
+                var tx = new Transaction
+                {
+                    RecentBlockHash = recentBlockhash,
+                    FeePayer = feePayerAccount.PublicKey,
+                    Instructions = new List<TransactionInstruction>(1) { ix },
+                    Signatures = new List<SignaturePubKeyPair>()
+                };
+
+                Transaction signedTx;
+                if (useSessionSigner)
+                {
+                    tx.Sign(feePayerAccount);
+                    signedTx = tx;
+                }
+                else
+                {
+                    signedTx = await SignWithPlayerAsync(tx, connectedPlayer);
+                }
+
+                if (signedTx == null)
+                {
+                    return false;
+                }
+
+                EmitStatus("Minting SPL Gold Tokens to ATA...");
+                string sig = await SendAndConfirmTransactionAsync(rpc, signedTx, ct);
+                if (string.IsNullOrEmpty(sig))
+                {
+                    EmitStatus("SPL Gold Mint Failed on Devnet");
+                    return false;
+                }
+
+                LastTransactionSignature = sig;
+                SettledTransactionCount++;
+                EmitStatus($"SPL Gold Minted to ATA ({ShortKey(sig)})");
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[SolanaScoundrelBridge] claim_gold_tokens exception: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                _txMutex.Release();
+            }
+
+            await RefreshBalancesAsync();
+            return true;
+        }
+
         public async Task<bool> CloseRunAsync()
         {
             EnsureLocalKeysInitialized();
@@ -457,14 +818,35 @@ namespace Scoundrel
                     return false;
                 }
 
+                var instructions = new List<TransactionInstruction>(2);
+
+                // Automatically mint any remaining unclaimed_gold before closing the DungeonRun PDA
+                var acctRes = await rpc.GetAccountInfoAsync(pda.Key, Commitment.Confirmed, BinaryEncoding.Base64);
+                var dataList = acctRes?.Result?.Value?.Data;
+                if (dataList != null && dataList.Count > 0 && !string.IsNullOrEmpty(dataList[0]))
+                {
+                    DungeonRunState liveState = DeserializeDungeonRun(Convert.FromBase64String(dataList[0]));
+                    if (liveState != null && liveState.UnclaimedGold > 0 &&
+                        TryDeriveGoldMintPda(programPubKey, out PublicKey goldMint, out _) &&
+                        TryDeriveAssociatedTokenAddress(connectedPlayer.PublicKey, goldMint, out PublicKey playerAta))
+                    {
+                        instructions.Add(BuildClaimGoldTokensInstruction(
+                            connectedPlayer.PublicKey,
+                            connectedPlayer.PublicKey,
+                            pda,
+                            goldMint,
+                            playerAta,
+                            programPubKey));
+                    }
+                }
+
+                instructions.Add(BuildCloseRunInstruction(connectedPlayer.PublicKey, pda, programPubKey));
+
                 var tx = new Transaction
                 {
                     RecentBlockHash = recentBlockhash,
                     FeePayer = connectedPlayer.PublicKey,
-                    Instructions = new List<TransactionInstruction>
-                    {
-                        BuildCloseRunInstruction(connectedPlayer.PublicKey, pda, programPubKey)
-                    },
+                    Instructions = instructions,
                     Signatures = new List<SignaturePubKeyPair>()
                 };
 
@@ -483,7 +865,7 @@ namespace Scoundrel
                 LastTransactionSignature = sig;
                 _hasActiveOnChainSession = false;
                 SettledTransactionCount++;
-                EmitStatus($"Run Closed • Rent Reclaimed ({ShortKey(sig)})");
+                EmitStatus($"Run Closed • Gold Minted & Rent Reclaimed ({ShortKey(sig)})");
                 return true;
             }
             catch (OperationCanceledException)
@@ -542,6 +924,77 @@ namespace Scoundrel
                 programPubKey,
                 out programIdentityPda,
                 out bump);
+        }
+
+        public static bool TryDeriveGoldMintPda(
+            PublicKey programPubKey,
+            out PublicKey goldMintPda,
+            out byte bump)
+        {
+            if (programPubKey == null)
+            {
+                goldMintPda = null;
+                bump = 0;
+                return false;
+            }
+
+            return PublicKey.TryFindProgramAddress(
+                new[] { GoldMintSeedPrefix },
+                programPubKey,
+                out goldMintPda,
+                out bump);
+        }
+
+        public static bool TryDeriveAssociatedTokenAddress(
+            PublicKey walletPubKey,
+            PublicKey mintPubKey,
+            out PublicKey ataPubKey)
+        {
+            ataPubKey = null;
+            if (walletPubKey == null || mintPubKey == null)
+            {
+                return false;
+            }
+
+            PublicKey tokenProgram = new PublicKey(SplTokenProgramAddress);
+            PublicKey ataProgram = new PublicKey(AssociatedTokenProgramAddress);
+            return PublicKey.TryFindProgramAddress(
+                new[] { walletPubKey.KeyBytes, tokenProgram.KeyBytes, mintPubKey.KeyBytes },
+                ataProgram,
+                out ataPubKey,
+                out _);
+        }
+
+        public static TransactionInstruction BuildClaimGoldTokensInstruction(
+            PublicKey payer,
+            PublicKey player,
+            PublicKey dungeonRunPda,
+            PublicKey goldMintPda,
+            PublicKey playerGoldAta,
+            PublicKey programPubKey)
+        {
+            byte[] data = new byte[8];
+            Buffer.BlockCopy(DiscClaimGoldTokens, 0, data, 0, 8);
+
+            PublicKey tokenProgram = new PublicKey(SplTokenProgramAddress);
+            PublicKey ataProgram = new PublicKey(AssociatedTokenProgramAddress);
+
+            return new TransactionInstruction
+            {
+                ProgramId = programPubKey.KeyBytes,
+                Keys = new List<AccountMeta>(8)
+                {
+                    AccountMeta.Writable(payer, true),
+                    AccountMeta.ReadOnly(player, false),
+                    AccountMeta.Writable(dungeonRunPda, false),
+                    AccountMeta.Writable(goldMintPda, false),
+                    AccountMeta.Writable(playerGoldAta, false),
+                    AccountMeta.ReadOnly(tokenProgram, false),
+                    AccountMeta.ReadOnly(ataProgram, false),
+                    AccountMeta.ReadOnly(SystemProgram.ProgramIdKey, false)
+                },
+                Data = data
+            };
         }
 
         public static TransactionInstruction BuildStartRunInstruction(
@@ -1110,11 +1563,7 @@ namespace Scoundrel
 
             if (_dungeonRunPda == null && TryGetProgramPublicKey(out PublicKey progKey))
             {
-                if (TryDeriveDungeonRunPda(effectivePlayer.PublicKey, progKey, out PublicKey pda, out _))
-                {
-                    _dungeonRunPda = pda;
-                    DungeonRunPdaAddress = pda.Key;
-                }
+                UpdateDerivedAddressesForPlayer(effectivePlayer.PublicKey);
             }
         }
 

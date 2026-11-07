@@ -67,6 +67,7 @@ namespace Scoundrel
         public event Action<DungeonRunState> OnStateChanged;
         public event Action<List<CardData>> OnRoomAvoided;
         public event Action<int, CardData> OnRoomSlotResolved;
+        public event Action<uint> OnGoldTokensMinted;
 
         public DungeonRunState State { get; private set; } = new DungeonRunState();
         public SolanaScoundrelBridge Bridge => solanaBridge;
@@ -325,6 +326,23 @@ namespace Scoundrel
             }
 
             return false;
+        }
+
+        public bool TryMintGoldTokens()
+        {
+            if (State == null || State.UnclaimedGold == 0) return false;
+
+            uint amountToMint = State.UnclaimedGold;
+            State.UnclaimedGold = 0;
+
+            if (solanaBridge != null)
+            {
+                solanaBridge.DispatchClaimGoldTokens(amountToMint);
+            }
+
+            NotifyStateChanged();
+            OnGoldTokensMinted?.Invoke(amountToMint);
+            return true;
         }
 
         public bool TryResolveCard(int slotIndex, bool useWeapon)

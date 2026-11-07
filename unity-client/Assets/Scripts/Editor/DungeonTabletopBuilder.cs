@@ -45,10 +45,11 @@ namespace Scoundrel.EditorTools
             ScoundrelTabletopUIController ui = UnityEngine.Object.FindFirstObjectByType<ScoundrelTabletopUIController>();
             MarketplaceModalUI market = UnityEngine.Object.FindFirstObjectByType<MarketplaceModalUI>(FindObjectsInactive.Include);
             SpoilsModalUI spoils = UnityEngine.Object.FindFirstObjectByType<SpoilsModalUI>(FindObjectsInactive.Include);
+            WalletConnectModalUI walletModal = UnityEngine.Object.FindFirstObjectByType<WalletConnectModalUI>(FindObjectsInactive.Include);
 
-            if (gm == null || ui == null || market == null || spoils == null)
+            if (gm == null || ui == null || market == null || spoils == null || walletModal == null)
             {
-                throw new Exception("Missing ScoundrelGameManager, ScoundrelTabletopUIController, MarketplaceModalUI, or SpoilsModalUI in scene.");
+                throw new Exception("Missing ScoundrelGameManager, ScoundrelTabletopUIController, MarketplaceModalUI, SpoilsModalUI, or WalletConnectModalUI in scene.");
             }
 
             // 1. Start deterministic VRF run and verify 44 unique cards
@@ -76,15 +77,24 @@ namespace Scoundrel.EditorTools
                 throw new Exception($"Marketplace activation mismatch: OfeBuff={gm.State.OfeBuffRoomsLeft}, ShieldBuff={gm.State.RustyShieldBuffRoomsLeft}");
             }
 
-            // 4. Open & close MarketplaceModalUI cleanly
+            // 4. Test SPL Gold Minting (claim_gold_tokens) for the remaining 45 UnclaimedGold
+            bool minted = gm.TryMintGoldTokens();
+            if (!minted || gm.State.UnclaimedGold != 0 || gm.Bridge.LastKnownMintedGoldBalance < 45)
+            {
+                throw new Exception($"SPL Gold minting mismatch: minted={minted}, remaining={gm.State.UnclaimedGold}, ataBalance={gm.Bridge.LastKnownMintedGoldBalance}");
+            }
+
+            // 5. Open & close MarketplaceModalUI and WalletConnectModalUI cleanly
             market.ShowModal();
             market.HideImmediate();
+            walletModal.ShowModal();
+            walletModal.HideImmediate();
 
-            // 5. Reset to clean fresh run for Play Mode
+            // 6. Reset to clean fresh run for Play Mode
             gm.StartNewRun(null, false);
             ui.RefreshHUD(gm.State);
 
-            return "Verified VRF 32-byte deck shuffle, Ofe (60G) & Rusty Shield (45G) purchases/activations, and MarketplaceModalUI + 3-Slot Consumable Rack.";
+            return "Verified VRF 32-byte deck shuffle, Ofe (60G) & Rusty Shield (45G) purchases/activations, SPL Gold Minting (claim_gold_tokens), MarketplaceModalUI, and WalletConnectModalUI.";
         }
 
         [CliCommand("scoundrel", "build_scene", "Configure Resources manifest, Bilinear FullRect sprite pipeline, and build Assets/Scenes/DungeonTabletop.unity")]
@@ -209,20 +219,20 @@ namespace Scoundrel.EditorTools
 
             // 2. Active Consumable Buffs Badge (Epic Potion Echo / Ofe Dodge / Rusty Shield)
             RectTransform echoBadgeRect = CreateAnchoredRect("EpicPotionEchoBadge", topHud,
-                new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(638f, 0f), new Vector2(422f, 54f));
+                new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(605f, 0f), new Vector2(360f, 54f));
             Image echoBadgeBg = echoBadgeRect.gameObject.AddComponent<Image>();
             echoBadgeBg.sprite = uiWhiteSprite;
             echoBadgeBg.color = new Color(0.10f, 0.13f, 0.18f, 0.85f);
             AddOutline(echoBadgeRect.gameObject, new Color(0.85f, 0.68f, 0.24f, 0.55f), 1.5f);
 
             TextMeshProUGUI echoBadgeText = CreateTMP("EpicEchoBadgeText", echoBadgeRect, fontAsset,
-                "Active Buffs: None", 17f, FontStyles.Bold, TextAlignmentOptions.Center,
+                "Active Buffs: None", 16.5f, FontStyles.Bold, TextAlignmentOptions.Center,
                 new Color(0.62f, 0.68f, 0.76f, 0.9f));
             StretchFull(echoBadgeText.rectTransform, 10f, 4f);
 
             // 3. Accumulated SPL Gold + Session Signer Status
             RectTransform goldBadgeRect = CreateAnchoredRect("GoldCounterPanel", topHud,
-                new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(1055f, 0f), new Vector2(378f, 56f));
+                new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(985f, 0f), new Vector2(370f, 56f));
             Image goldBg = goldBadgeRect.gameObject.AddComponent<Image>();
             goldBg.sprite = uiWhiteSprite;
             goldBg.color = new Color(0.11f, 0.14f, 0.20f, 0.95f);
@@ -235,7 +245,7 @@ namespace Scoundrel.EditorTools
             goldIconImg.preserveAspect = true;
 
             TextMeshProUGUI goldValueText = CreateTMP("GoldValueText", goldBadgeRect, fontAsset,
-                "SPL Gold: 0", 22f, FontStyles.Bold, TextAlignmentOptions.Left,
+                "SPL Gold: 0", 21f, FontStyles.Bold, TextAlignmentOptions.Left,
                 new Color(0.98f, 0.82f, 0.28f, 1f));
             goldValueText.rectTransform.anchorMin = new Vector2(0f, 0.36f);
             goldValueText.rectTransform.anchorMax = new Vector2(1f, 1f);
@@ -243,23 +253,32 @@ namespace Scoundrel.EditorTools
             goldValueText.rectTransform.offsetMax = new Vector2(-12f, -4f);
 
             TextMeshProUGUI sessionStatusText = CreateTMP("SessionKeyStatusText", goldBadgeRect, fontAsset,
-                "MagicBlock VRF Seeded • Local Sim", 12.5f, FontStyles.Normal, TextAlignmentOptions.Left,
+                "MagicBlock VRF Seeded • Local Sim", 12f, FontStyles.Normal, TextAlignmentOptions.Left,
                 new Color(0.52f, 0.86f, 0.76f, 0.92f));
             sessionStatusText.rectTransform.anchorMin = new Vector2(0f, 0f);
             sessionStatusText.rectTransform.anchorMax = new Vector2(1f, 0.42f);
             sessionStatusText.rectTransform.offsetMin = new Vector2(64f, 4f);
             sessionStatusText.rectTransform.offsetMax = new Vector2(-12f, 0f);
 
-            // 4. Merchant Button (Opens Mini Marketplace Modal)
+            // 4. Wallet & Devnet Modal Button (Opens Live Wallet Adapter & SPL Gold Mint Modal)
+            Button openWalletBtn = CreateStyledButton("WalletConnectButton", topHud, fontAsset, uiWhiteSprite,
+                new Vector2(0f, 0.5f), new Vector2(1280f, 0f), new Vector2(192f, 56f),
+                "WALLET / DEVNET", 16.5f,
+                new Color(0.14f, 0.52f, 0.38f, 1f),
+                new Color(0.20f, 0.68f, 0.50f, 1f),
+                new Color(0.16f, 0.20f, 0.18f, 0.8f),
+                out _);
+
+            // 5. Merchant Button (Opens Mini Marketplace Modal)
             Button openMarketBtn = CreateStyledButton("MarketButton", topHud, fontAsset, uiWhiteSprite,
-                new Vector2(0f, 0.5f), new Vector2(1366f, 0f), new Vector2(204f, 56f),
-                "MERCHANT", 19f,
+                new Vector2(0f, 0.5f), new Vector2(1490f, 0f), new Vector2(196f, 56f),
+                "MERCHANT", 18.5f,
                 new Color(0.76f, 0.52f, 0.14f, 1f),
                 new Color(0.92f, 0.66f, 0.20f, 1f),
                 new Color(0.18f, 0.18f, 0.22f, 0.8f),
                 out _);
 
-            // 5. Avoid Room Button (Right side of Top HUD)
+            // 6. Avoid Room Button (Right side of Top HUD)
             Button avoidRoomBtn = CreateStyledButton("AvoidRoomButton", topHud, fontAsset, uiWhiteSprite,
                 new Vector2(1f, 0.5f), new Vector2(-150f, 0f), new Vector2(248f, 56f),
                 "AVOID ROOM", 19f,
@@ -746,6 +765,156 @@ namespace Scoundrel.EditorTools
                 marketplaceModal);
 
             // =====================================================================
+            // E3. SOLANA DEVNET WALLET ADAPTER & SPL GOLD MINT MODAL OVERLAY
+            // =====================================================================
+            RectTransform walletRoot = CreateFullStretchRect("WalletConnectModal", canvasGo.transform);
+            Image walletBackdropImg = walletRoot.gameObject.AddComponent<Image>();
+            walletBackdropImg.sprite = uiWhiteSprite;
+            walletBackdropImg.color = new Color(0.02f, 0.04f, 0.08f, 0.88f);
+            CanvasGroup walletBackdropGroup = walletRoot.gameObject.AddComponent<CanvasGroup>();
+
+            RectTransform walletModalPanel = CreateAnchoredRect("WalletConnectModalPanel", walletRoot,
+                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(1140f, 650f));
+            Image walletPanelImg = walletModalPanel.gameObject.AddComponent<Image>();
+            walletPanelImg.sprite = uiWhiteSprite;
+            walletPanelImg.color = new Color(0.068f, 0.098f, 0.152f, 0.99f);
+            AddOutline(walletModalPanel.gameObject, new Color(0.32f, 0.88f, 0.64f, 0.88f), 3f);
+
+            RectTransform walletModePill = CreateAnchoredRect("WalletModeBadge", walletModalPanel,
+                new Vector2(0.5f, 1f), new Vector2(0.5f, 1f), new Vector2(0f, -42f), new Vector2(580f, 44f));
+            Image walletModePillBg = walletModePill.gameObject.AddComponent<Image>();
+            walletModePillBg.sprite = uiWhiteSprite;
+            walletModePillBg.color = new Color(0.06f, 0.24f, 0.18f, 0.96f);
+            AddOutline(walletModePill.gameObject, new Color(0.38f, 0.92f, 0.68f, 0.75f), 1.5f);
+
+            TextMeshProUGUI walletModeBadgeText = CreateTMP("WalletModeBadgeText", walletModePill, fontAsset,
+                "MODE: LOCAL VRF SIMULATION (ZERO RPC DELAY)", 18f, FontStyles.Bold, TextAlignmentOptions.Center,
+                new Color(1.0f, 0.88f, 0.36f, 1f));
+            StretchFull(walletModeBadgeText.rectTransform);
+
+            TextMeshProUGUI walletHeaderTitle = CreateTMP("WalletHeaderTitle", walletModalPanel, fontAsset,
+                "SOLANA DEVNET WALLET & SPL GOLD MINT", 34f, FontStyles.Bold, TextAlignmentOptions.Center,
+                new Color(0.46f, 0.98f, 0.74f, 1f));
+            walletHeaderTitle.rectTransform.anchorMin = new Vector2(0f, 1f);
+            walletHeaderTitle.rectTransform.anchorMax = new Vector2(1f, 1f);
+            walletHeaderTitle.rectTransform.anchoredPosition = new Vector2(0f, -94f);
+            walletHeaderTitle.rectTransform.sizeDelta = new Vector2(-80f, 44f);
+
+            TextMeshProUGUI walletSubtitle = CreateTMP("WalletSubtitle", walletModalPanel, fontAsset,
+                "Connect Wallet Adapter or Devnet Burner • Ephemeral Session Keys Sign Gameplay Turns • Mint Unclaimed Gold to ATA",
+                17.5f, FontStyles.Normal, TextAlignmentOptions.Center, new Color(0.80f, 0.86f, 0.94f, 0.95f));
+            walletSubtitle.rectTransform.anchorMin = new Vector2(0f, 1f);
+            walletSubtitle.rectTransform.anchorMax = new Vector2(1f, 1f);
+            walletSubtitle.rectTransform.anchoredPosition = new Vector2(0f, -134f);
+            walletSubtitle.rectTransform.sizeDelta = new Vector2(-80f, 30f);
+
+            Button closeWalletBtn = CreateStyledButton("CloseWalletModalButton", walletModalPanel, fontAsset, uiWhiteSprite,
+                new Vector2(1f, 1f), new Vector2(-88f, -42f), new Vector2(124f, 44f),
+                "CLOSE", 18f,
+                new Color(0.24f, 0.28f, 0.38f, 1f),
+                new Color(0.34f, 0.40f, 0.52f, 1f),
+                new Color(0.16f, 0.18f, 0.22f, 0.8f),
+                out _);
+
+            RectTransform addrBox = CreateAnchoredRect("WalletAddressesBox", walletModalPanel,
+                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0f, 46f), new Vector2(1040f, 194f));
+            Image addrBoxBg = addrBox.gameObject.AddComponent<Image>();
+            addrBoxBg.sprite = uiWhiteSprite;
+            addrBoxBg.color = new Color(0.045f, 0.068f, 0.108f, 0.96f);
+            AddOutline(addrBox.gameObject, new Color(0.26f, 0.42f, 0.58f, 0.6f), 1.5f);
+
+            TextMeshProUGUI walletAddressesText = CreateTMP("WalletAddressesText", addrBox, fontAsset,
+                "Program ID: 7r9dGYN2WiNKgr7wD89Heh4rrWX1zkGhxs8ckjKfbNQx", 16f, FontStyles.Normal,
+                TextAlignmentOptions.Left, new Color(0.86f, 0.92f, 0.98f, 0.96f));
+            StretchFull(walletAddressesText.rectTransform, 24f, 14f);
+
+            RectTransform balBox = CreateAnchoredRect("WalletBalancesBox", walletModalPanel,
+                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0f, -86f), new Vector2(1040f, 52f));
+            Image balBoxBg = balBox.gameObject.AddComponent<Image>();
+            balBoxBg.sprite = uiWhiteSprite;
+            balBoxBg.color = new Color(0.09f, 0.13f, 0.20f, 0.96f);
+            AddOutline(balBox.gameObject, new Color(0.92f, 0.76f, 0.28f, 0.6f), 1.5f);
+
+            TextMeshProUGUI balancesSummaryText = CreateTMP("WalletBalancesSummaryText", balBox, fontAsset,
+                "Devnet Balance: 0.000 SOL   •   Unclaimed Run Gold: 0 GOLD   •   Minted SPL Gold ATA: 0 GOLD",
+                18.5f, FontStyles.Normal, TextAlignmentOptions.Center, Color.white);
+            StretchFull(balancesSummaryText.rectTransform, 18f, 6f);
+
+            TextMeshProUGUI bridgeStatusReadout = CreateTMP("WalletBridgeStatusText", walletModalPanel, fontAsset,
+                "Status: Session Key Ready", 15.5f, FontStyles.Normal, TextAlignmentOptions.Center,
+                new Color(0.62f, 0.88f, 0.78f, 0.92f));
+            bridgeStatusReadout.rectTransform.anchorMin = new Vector2(0f, 0.5f);
+            bridgeStatusReadout.rectTransform.anchorMax = new Vector2(1f, 0.5f);
+            bridgeStatusReadout.rectTransform.anchoredPosition = new Vector2(0f, -134f);
+            bridgeStatusReadout.rectTransform.sizeDelta = new Vector2(-80f, 28f);
+
+            // Row 1 Action Buttons: Connect Wallet Adapter, Devnet Burner + Airdrop, Switch Network Mode
+            Button connectAdapterBtn = CreateStyledButton("ConnectWalletAdapterButton", walletModalPanel, fontAsset, uiWhiteSprite,
+                new Vector2(0.5f, 0f), new Vector2(-346f, 118f), new Vector2(326f, 56f),
+                "CONNECT WALLET ADAPTER", 17f,
+                new Color(0.28f, 0.22f, 0.68f, 1f),
+                new Color(0.38f, 0.30f, 0.86f, 1f),
+                new Color(0.18f, 0.16f, 0.24f, 0.8f),
+                out TextMeshProUGUI connectAdapterBtnText);
+
+            Button devnetBurnerBtn = CreateStyledButton("DevnetBurnerWalletButton", walletModalPanel, fontAsset, uiWhiteSprite,
+                new Vector2(0.5f, 0f), new Vector2(0f, 118f), new Vector2(326f, 56f),
+                "DEVNET BURNER + AIRDROP", 17f,
+                new Color(0.14f, 0.52f, 0.38f, 1f),
+                new Color(0.20f, 0.68f, 0.50f, 1f),
+                new Color(0.16f, 0.20f, 0.18f, 0.8f),
+                out TextMeshProUGUI devnetBurnerBtnText);
+
+            Button toggleModeBtn = CreateStyledButton("ToggleNetworkModeButton", walletModalPanel, fontAsset, uiWhiteSprite,
+                new Vector2(0.5f, 0f), new Vector2(346f, 118f), new Vector2(326f, 56f),
+                "SWITCH TO DEVNET LIVE", 17f,
+                new Color(0.16f, 0.42f, 0.64f, 1f),
+                new Color(0.22f, 0.54f, 0.80f, 1f),
+                new Color(0.16f, 0.18f, 0.22f, 0.8f),
+                out TextMeshProUGUI toggleModeBtnText);
+
+            // Row 2 Action Buttons: Mint SPL Gold to ATA & Copy Wallet Address
+            Button mintGoldBtn = CreateStyledButton("MintSplGoldButton", walletModalPanel, fontAsset, uiWhiteSprite,
+                new Vector2(0.5f, 0f), new Vector2(-180f, 48f), new Vector2(460f, 54f),
+                "MINT SPL GOLD TO ATA", 18f,
+                new Color(0.76f, 0.52f, 0.12f, 1f),
+                new Color(0.92f, 0.66f, 0.18f, 1f),
+                new Color(0.20f, 0.18f, 0.14f, 0.8f),
+                out TextMeshProUGUI mintGoldBtnText);
+
+            Button copyAddressBtn = CreateStyledButton("CopyWalletAddressButton", walletModalPanel, fontAsset, uiWhiteSprite,
+                new Vector2(0.5f, 0f), new Vector2(260f, 48f), new Vector2(360f, 54f),
+                "COPY WALLET ADDRESS", 17.5f,
+                new Color(0.24f, 0.30f, 0.40f, 1f),
+                new Color(0.34f, 0.42f, 0.54f, 1f),
+                new Color(0.16f, 0.18f, 0.22f, 0.8f),
+                out TextMeshProUGUI copyAddressBtnText);
+
+            WalletConnectModalUI walletModal = walletRoot.gameObject.AddComponent<WalletConnectModalUI>();
+            walletModal.ConfigureReferences(
+                gameManager,
+                walletBackdropGroup,
+                walletModalPanel,
+                walletHeaderTitle,
+                walletSubtitle,
+                walletModeBadgeText,
+                walletModePillBg,
+                closeWalletBtn,
+                walletAddressesText,
+                balancesSummaryText,
+                bridgeStatusReadout,
+                connectAdapterBtn,
+                connectAdapterBtnText,
+                devnetBurnerBtn,
+                devnetBurnerBtnText,
+                toggleModeBtn,
+                toggleModeBtnText,
+                mintGoldBtn,
+                mintGoldBtnText,
+                copyAddressBtn,
+                copyAddressBtnText);
+
+            // =====================================================================
             // F. GAME OVER (VICTORY / DEFEAT) MODAL
             // =====================================================================
             RectTransform gameOverRoot = CreateFullStretchRect("GameOverModal", canvasGo.transform);
@@ -798,6 +967,7 @@ namespace Scoundrel.EditorTools
             combatChoiceRect.gameObject.SetActive(false);
             spoilsRoot.gameObject.SetActive(false);
             marketRoot.gameObject.SetActive(false);
+            walletRoot.gameObject.SetActive(false);
 
             // =====================================================================
             // G. WIRE CONTROLLERS & SAVE SCENE
@@ -872,6 +1042,8 @@ namespace Scoundrel.EditorTools
                 useRustyShieldBtn,
                 useRustyShieldBtnText);
 
+            uiController.ConfigureWalletModal(walletModal, openWalletBtn);
+
             // Enforce RobotoSlab-Regular SDF across EVERY TextMeshProUGUI in the scene
             int tmpCount = 0;
             foreach (TextMeshProUGUI tmp in canvasGo.GetComponentsInChildren<TextMeshProUGUI>(true))
@@ -890,6 +1062,7 @@ namespace Scoundrel.EditorTools
             EditorUtility.SetDirty(fxController);
             EditorUtility.SetDirty(spoilsModal);
             EditorUtility.SetDirty(marketplaceModal);
+            EditorUtility.SetDirty(walletModal);
             EditorUtility.SetDirty(uiController);
             EditorSceneManager.MarkSceneDirty(scene);
             EditorSceneManager.SaveScene(scene, TargetScenePath);
