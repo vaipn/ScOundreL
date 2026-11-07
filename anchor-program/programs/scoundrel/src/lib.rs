@@ -5,6 +5,7 @@ declare_id!("7r9dGYN2WiNKgr7wD89Heh4rrWX1zkGhxs8ckjKfbNQx");
 pub const DECK_SIZE: usize = 44;
 pub const ROOM_SIZE: usize = 4;
 pub const MAX_HP_TENTHS: u16 = 200;
+pub const LEGENDARY_WEAPONS_ENABLED: bool = false;
 
 pub const RUN_STATUS_ACTIVE: u8 = 0;
 pub const RUN_STATUS_VICTORY: u8 = 1;
@@ -116,10 +117,11 @@ pub mod scoundrel {
         run.cards_resolved_in_room = 0;
         run.hp_tenths = MAX_HP_TENTHS;
         run.max_hp_tenths = MAX_HP_TENTHS;
+        let allow_legendary = LEGENDARY_WEAPONS_ENABLED && has_legendary_nft;
         run.equipped_weapon_rank = 0;
         run.weapon_ceiling = 0;
-        run.has_legendary_skin = has_legendary_nft;
-        run.legendary_forged_edge_charges = if has_legendary_nft { 1 } else { 0 };
+        run.has_legendary_skin = allow_legendary;
+        run.legendary_forged_edge_charges = if allow_legendary { 1 } else { 0 };
         run.potion_used_this_room = false;
         run.first_potion_healed_tenths = 0;
         run.epic_potions_inventory = 0;
@@ -243,7 +245,7 @@ pub mod scoundrel {
             CardCategory::Weapon => {
                 run.equipped_weapon_rank = card_rank;
                 run.weapon_ceiling = 14;
-                if run.has_legendary_skin {
+                if LEGENDARY_WEAPONS_ENABLED && run.has_legendary_skin {
                     run.legendary_forged_edge_charges = 1;
                 }
             }
@@ -327,6 +329,10 @@ pub mod scoundrel {
                     run.unclaimed_gold = run.unclaimed_gold.saturating_add(25);
                 }
                 2 => {
+                    require!(
+                        LEGENDARY_WEAPONS_ENABLED,
+                        ScoundrelError::InvalidSpoilsChoice
+                    );
                     run.has_legendary_skin = true;
                     run.legendary_forged_edge_charges = 1;
                     emit!(LegendarySkinUnlocked {

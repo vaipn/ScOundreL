@@ -103,15 +103,15 @@ describe("scoundrel", () => {
     const expectedRaw = simulateShuffle(targetRngState);
     const expectedDeck = expectedRaw.map(decodeCard);
 
-    for (let attempt = 0; attempt < 8; attempt++) {
+    for (let attempt = 0; attempt < 16; attempt++) {
       const player = Keypair.generate();
       const sessionSigner = Keypair.generate();
       await fundKeypairs(player, sessionSigner);
 
       const dungeonRun = deriveDungeonRunPda(player.publicKey);
       const currentSlot = await provider.connection.getSlot("processed");
-      // Adjust for potential slot increment when sending transaction if prior attempt observed an offset
-      const slotGuess = BigInt(currentSlot + (attempt % 2));
+      // Adjust for potential slot increments between getSlot and startRun execution
+      const slotGuess = BigInt(currentSlot + (attempt % 4));
       const seed = (targetRngState - slotGuess) & U64_MASK;
 
       await program.methods
@@ -621,7 +621,7 @@ describe("scoundrel", () => {
     expect(state.epicPotionBuffRoomsLeft).to.equal(0);
   });
 
-  it("5. Claims High Threat Spoils (T >= 25), emits LegendarySkinUnlocked, and allows 1-time weapon ceiling bypass", async () => {
+  it("5. Claims High Threat Spoils (T >= 25) and enforces disabled Legendary Weapon gate", async () => {
     const targetK = findTargetRngState((d) => {
       if (d[0].category !== "monster" || d[1].category !== "monster") return false;
       const sumRanks = d[0].rank + d[1].rank;
@@ -632,9 +632,14 @@ describe("scoundrel", () => {
       return true;
     });
 
-    const { sessionSigner, dungeonRun, expectedDeck } = await startDeterministicRun(targetK);
+    const { sessionSigner, dungeonRun, expectedDeck } = await startDeterministicRun(targetK, true);
 
-    // Fight two monsters barehanded for High Threat (T >= 26) + equip strong weapon (rank >= 8)
+    // Even when `has_legendary_nft = true` is passed, LEGENDARY_WEAPONS_ENABLED=false clamps it to disabled
+    let state = await program.account.dungeonRun.fetch(dungeonRun);
+    expect(state.hasLegendarySkin).to.be.false;
+    expect(state.legendaryForgedEdgeCharges).to.equal(0);
+
+    // Fight two monsters barehanded for High Threat (T >= 25) + equip weapon
     await program.methods
       .resolveCard(0, false)
       .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
@@ -651,38 +656,39 @@ describe("scoundrel", () => {
       .signers([sessionSigner])
       .rpc();
 
-    let state = await program.account.dungeonRun.fetch(dungeonRun);
+    state = await program.account.dungeonRun.fetch(dungeonRun);
     const expectedThreat = expectedDeck[0].rank + 5 + (expectedDeck[1].rank + 5);
     expect(state.pendingSpoilsThreat).to.equal(expectedThreat);
     expect(state.pendingSpoilsThreat).to.be.greaterThanOrEqual(25);
 
-    // Claim High Spoils Choice 2 -> Unlock Legendary Weapon Skin + 1 Forged Edge charge
-    let unlockedEventPlayer: string | null = null;
-    let unlockedEventThreat = 0;
-    const listenerId = program.addEventListener("legendarySkinUnlocked", (event: any) => {
-      unlockedEventPlayer = event.player.toBase58();
-      unlockedEventThreat = event.threatScore;
-    });
-
+    // Attempting High Spoils Choice 2 (Legendary Weapon) must fail while disabled
+    let legendaryBlocked = false;
     try {
       await program.methods
         .claimSpoils(2)
         .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
         .signers([sessionSigner])
         .rpc();
-    } finally {
-      await program.removeEventListener(listenerId);
+    } catch (err: any) {
+      legendaryBlocked = true;
+      expect(String(err)).to.include("InvalidSpoilsChoice");
     }
+    expect(legendaryBlocked).to.be.true;
+
+    // Claim High Spoils Choice 1 (+1 Epic Potion + 25 Gold) succeeds cleanly
+    await program.methods
+      .claimSpoils(1)
+      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
+      .signers([sessionSigner])
+      .rpc();
 
     state = await program.account.dungeonRun.fetch(dungeonRun);
-    expect(state.hasLegendarySkin).to.be.true;
-    expect(state.legendaryForgedEdgeCharges).to.equal(1);
-    if (unlockedEventPlayer !== null) {
-      expect(unlockedEventPlayer).to.equal(state.player.toBase58());
-      expect(unlockedEventThreat).to.equal(expectedThreat);
-    }
+    expect(state.epicPotionsInventory).to.equal(1);
+    expect(state.unclaimedGold).to.equal(25);
+    expect(state.hasLegendarySkin).to.be.false;
+    expect(state.legendaryForgedEdgeCharges).to.equal(0);
 
-    // Room 2: Slot 0 is low monster (rank 3..5) -> degrades weaponCeiling to 3..5
+    // Room 2: Slot 0 is low monster -> degrades weaponCeiling
     await program.methods
       .resolveCard(0, true)
       .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
@@ -691,17 +697,19 @@ describe("scoundrel", () => {
 
     state = await program.account.dungeonRun.fetch(dungeonRun);
     expect(state.weaponCeiling).to.equal(expectedDeck[4].rank);
-    expect(state.legendaryForgedEdgeCharges).to.equal(1);
 
-    // Slot 1 is high monster (rank 7..9 > weaponCeiling 3..5) -> SUCCEEDS via Legendary Forged Edge charge!
-    await program.methods
-      .resolveCard(1, true)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
-
-    state = await program.account.dungeonRun.fetch(dungeonRun);
-    expect(state.legendaryForgedEdgeCharges).to.equal(0);
-    expect(state.weaponCeiling).to.equal(expectedDeck[5].rank);
+    // Slot 1 is higher monster (> weaponCeiling) -> strictly rejected with WeaponCeilingExceeded!
+    let ceilingRejected = false;
+    try {
+      await program.methods
+        .resolveCard(1, true)
+        .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
+        .signers([sessionSigner])
+        .rpc();
+    } catch (err: any) {
+      ceilingRejected = true;
+      expect(String(err)).to.include("WeaponCeilingExceeded");
+    }
+    expect(ceilingRejected).to.be.true;
   });
 });
