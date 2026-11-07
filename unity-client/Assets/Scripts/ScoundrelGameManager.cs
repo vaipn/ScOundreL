@@ -22,9 +22,13 @@ namespace Scoundrel
 
         [Header("Run Configuration")]
         [SerializeField] private bool autoStartOnAwake = true;
+        [Tooltip("Temporarily disabled for gameplay balance; set true to re-enable Legendary Weapon unlocks & Forged Edge charges.")]
+        [SerializeField] private bool enableLegendaryWeapons = false;
         [SerializeField] private bool startWithLegendaryNft = false;
         [Tooltip("Optional starter Epic Potion in Offline Demo so judges can immediately test Balatro consumable slot too; 0 matches pure fresh chain state.")]
         [SerializeField] private byte demoStartingEpicPotions = 1;
+
+        public bool EnableLegendaryWeapons => enableLegendaryWeapons;
 
         [Header("UnityEvent Hooks (Inspector)")]
         [SerializeField] private UnityEvent onRoomDealt = new UnityEvent();
@@ -86,7 +90,7 @@ namespace Scoundrel
         public void StartNewRun(ulong? explicitSeed = null, bool? overrideLegendaryNft = null)
         {
             ulong seed = explicitSeed ?? (ulong)DateTime.UtcNow.Ticks ^ (ulong)UnityEngine.Random.Range(1, int.MaxValue);
-            bool hasLegendary = overrideLegendaryNft ?? startWithLegendaryNft;
+            bool hasLegendary = enableLegendaryWeapons && (overrideLegendaryNft ?? startWithLegendaryNft);
 
             State = new DungeonRunState
             {
@@ -330,7 +334,7 @@ namespace Scoundrel
                     State.EquippedWeaponRank = (byte)card.Rank;
                     State.EquippedWeaponCardId = card.CardId;
                     State.WeaponCeiling = 14;
-                    if (State.HasLegendarySkin)
+                    if (enableLegendaryWeapons && State.HasLegendarySkin)
                     {
                         State.LegendaryForgedEdgeCharges = 1;
                     }
@@ -472,6 +476,7 @@ namespace Scoundrel
                     }
                     else if (choiceIndex == 2)
                     {
+                        if (!enableLegendaryWeapons) return false;
                         State.HasLegendarySkin = true;
                         State.LegendaryForgedEdgeCharges = 1;
                     }

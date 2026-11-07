@@ -196,6 +196,7 @@ namespace Scoundrel
         private void Start()
         {
             BindEvents();
+            ApplyLegendaryFeatureGate();
             if (gameManager != null && gameManager.State != null)
             {
                 RefreshHUD(gameManager.State);
@@ -904,6 +905,7 @@ namespace Scoundrel
             DOVirtual.DelayedCall(0.45f, () =>
             {
                 if (this == null || gameOverModalRoot == null) return;
+                ApplyLegendaryFeatureGate();
                 gameOverModalRoot.SetActive(true);
                 if (gameOverCanvasGroup != null)
                 {
@@ -933,6 +935,19 @@ namespace Scoundrel
                         $"Remaining HP: {(st != null ? st.FormatHpText() : "0.0 / 20 HP")}";
                 }
             });
+        }
+
+        private void ApplyLegendaryFeatureGate()
+        {
+            bool legendaryAllowed = gameManager != null && gameManager.EnableLegendaryWeapons;
+            if (newRunLegendaryNftButton != null)
+            {
+                newRunLegendaryNftButton.gameObject.SetActive(legendaryAllowed);
+            }
+            if (newRunStandardButton != null && newRunStandardButton.transform is RectTransform stdRect)
+            {
+                stdRect.anchoredPosition = legendaryAllowed ? new Vector2(-175f, 74f) : new Vector2(0f, 74f);
+            }
         }
 
         private void HideGameOverModal()

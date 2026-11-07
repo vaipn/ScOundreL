@@ -546,7 +546,7 @@ namespace Scoundrel.EditorTools
             gameOverSubtitleText.rectTransform.sizeDelta = new Vector2(-80f, 140f);
 
             Button newRunStdBtn = CreateStyledButton("NewRunStandardButton", goPanel, fontAsset, uiWhiteSprite,
-                new Vector2(0.5f, 0f), new Vector2(-175f, 74f), new Vector2(310f, 64f),
+                new Vector2(0.5f, 0f), new Vector2(0f, 74f), new Vector2(310f, 64f),
                 "NEW DUNGEON RUN", 20f,
                 new Color(0.16f, 0.48f, 0.34f, 1f),
                 new Color(0.22f, 0.62f, 0.44f, 1f),
@@ -560,6 +560,7 @@ namespace Scoundrel.EditorTools
                 new Color(0.92f, 0.60f, 0.16f, 1f),
                 new Color(0.22f, 0.18f, 0.12f, 0.8f),
                 out _);
+            newRunNftBtn.gameObject.SetActive(false);
 
             gameOverRoot.gameObject.SetActive(false);
             combatChoiceRect.gameObject.SetActive(false);

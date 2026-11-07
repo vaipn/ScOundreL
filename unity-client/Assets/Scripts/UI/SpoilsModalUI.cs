@@ -215,12 +215,20 @@ namespace Scoundrel
             }
             else
             {
+                bool legendaryAllowed = _gameManager != null && _gameManager.EnableLegendaryWeapons;
                 SetupLootSlot(0, true, coinStack, "+85 SPL GOLD", "Vault Sovereign SPL Hoard\nMassive Gold Injection", "HIGH BOUNTY",
                     new Color(0.98f, 0.80f, 0.25f, 1f), false, false);
                 SetupLootSlot(1, true, epicPotion, "EPIC POTION + 25 GOLD", "+1 Epic Health Potion Consumable\nPlus +25 Bonus SPL Gold", "ALCHEMIST CACHE",
                     new Color(0.52f, 0.90f, 1.0f, 1f), true, false);
-                SetupLootSlot(2, true, legendarySkin, "LEGENDARY WEAPON SKIN", "Unlocks Forged Edge Charge (1x Ignore\nWeapon Ceiling) & Cleave Finisher VFX!", "MYTHIC ARTIFACT",
-                    new Color(1.0f, 0.56f, 0.22f, 1f), true, true);
+                if (legendaryAllowed)
+                {
+                    SetupLootSlot(2, true, legendarySkin, "LEGENDARY WEAPON SKIN", "Unlocks Forged Edge Charge (1x Ignore\nWeapon Ceiling) & Cleave Finisher VFX!", "MYTHIC ARTIFACT",
+                        new Color(1.0f, 0.56f, 0.22f, 1f), true, true);
+                }
+                else
+                {
+                    SetupLootSlot(2, false, null, "", "", "", Color.white, false, false);
+                }
             }
         }
 
