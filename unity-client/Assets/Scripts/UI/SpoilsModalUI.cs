@@ -22,6 +22,10 @@ namespace Scoundrel
         [Header("Loot Cards (3 Slots)")]
         [SerializeField] private SpoilsLootCardButton[] lootCards = new SpoilsLootCardButton[3];
 
+        [Header("Merchant Hook")]
+        [SerializeField] private Button visitMerchantButton;
+        [SerializeField] private MarketplaceModalUI marketplaceModal;
+
         [Header("Shader Material")]
         [SerializeField] private Material sharedFoilMaterial;
 
@@ -39,7 +43,9 @@ namespace Scoundrel
             Image threatBg,
             TextMeshProUGUI echoSubtitle,
             SpoilsLootCardButton[] cards,
-            Material foilMat)
+            Material foilMat,
+            Button merchantBtn = null,
+            MarketplaceModalUI marketModal = null)
         {
             _gameManager = manager;
             backdropGroup = backdrop;
@@ -50,13 +56,29 @@ namespace Scoundrel
             echoSubtitleText = echoSubtitle;
             lootCards = cards;
             sharedFoilMaterial = foilMat;
+            visitMerchantButton = merchantBtn;
+            marketplaceModal = marketModal;
         }
 
         private void Awake()
         {
+            if (visitMerchantButton != null)
+            {
+                visitMerchantButton.onClick.RemoveAllListeners();
+                visitMerchantButton.onClick.AddListener(OnVisitMerchantClicked);
+            }
+
             if (!_isOpen)
             {
                 HideImmediate();
+            }
+        }
+
+        private void OnVisitMerchantClicked()
+        {
+            if (marketplaceModal != null)
+            {
+                marketplaceModal.ShowModal();
             }
         }
 
@@ -117,6 +139,12 @@ namespace Scoundrel
             if (_isOpen) return;
             _isOpen = true;
             gameObject.SetActive(true);
+
+            if (visitMerchantButton != null)
+            {
+                visitMerchantButton.onClick.RemoveAllListeners();
+                visitMerchantButton.onClick.AddListener(OnVisitMerchantClicked);
+            }
 
             ScoundrelResources.ApplyFont(headerTitleText);
             ScoundrelResources.ApplyFont(threatBadgeText);

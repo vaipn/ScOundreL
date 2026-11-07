@@ -11,6 +11,7 @@ namespace Scoundrel
         [Header("Core References")]
         [SerializeField] private ScoundrelGameManager gameManager;
         [SerializeField] private SpoilsModalUI spoilsModal;
+        [SerializeField] private MarketplaceModalUI marketplaceModal;
         [SerializeField] private Material sharedFoilMaterial;
         [SerializeField] private RectTransform animationLayer;
 
@@ -22,6 +23,7 @@ namespace Scoundrel
         [SerializeField] private TextMeshProUGUI epicEchoBadgeText;
         [SerializeField] private TextMeshProUGUI goldValueText;
         [SerializeField] private TextMeshProUGUI sessionStatusText;
+        [SerializeField] private Button openMarketButton;
         [SerializeField] private Button avoidRoomButton;
         [SerializeField] private TextMeshProUGUI avoidRoomButtonText;
 
@@ -34,12 +36,24 @@ namespace Scoundrel
         [SerializeField] private Image discardPileBackImage;
         [SerializeField] private TextMeshProUGUI discardCountText;
 
-        [Header("Center Right — Balatro Consumable Slot (Epic Health Potion)")]
+        [Header("Center Right — 3-Slot Balatro Consumable Rack (Potion, Ofe, Rusty Shield)")]
         [SerializeField] private RectTransform consumableCardHolder;
         [SerializeField] private Image consumableGoldenAura;
         [SerializeField] private TextMeshProUGUI consumableCountBadgeText;
         [SerializeField] private Button useEpicPotionButton;
         [SerializeField] private TextMeshProUGUI useEpicPotionButtonText;
+
+        [SerializeField] private RectTransform ofeCardHolder;
+        [SerializeField] private Image ofeCyanAura;
+        [SerializeField] private TextMeshProUGUI ofeCountBadgeText;
+        [SerializeField] private Button useOfeButton;
+        [SerializeField] private TextMeshProUGUI useOfeButtonText;
+
+        [SerializeField] private RectTransform rustyShieldCardHolder;
+        [SerializeField] private Image rustyShieldAmberAura;
+        [SerializeField] private TextMeshProUGUI rustyShieldCountBadgeText;
+        [SerializeField] private Button useRustyShieldButton;
+        [SerializeField] private TextMeshProUGUI useRustyShieldButtonText;
 
         [Header("Bottom Play Area — Equipped Weapon & Combat Prompt")]
         [SerializeField] private RectTransform equippedWeaponAnchor;
@@ -69,13 +83,15 @@ namespace Scoundrel
         [Header("Card Layout Settings")]
         [SerializeField] private Vector2 roomCardSize = new Vector2(182f, 256f);
         [SerializeField] private Vector2 weaponCardSize = new Vector2(168f, 236f);
-        [SerializeField] private Vector2 consumableCardSize = new Vector2(132f, 186f);
+        [SerializeField] private Vector2 consumableCardSize = new Vector2(86f, 120f);
         [SerializeField] private Vector2 monsterStackCascadeOffset = new Vector2(38f, -12f);
 
         private readonly BalatroCardVisual[] _activeRoomVisuals = new BalatroCardVisual[4];
         private BalatroCardVisual _equippedWeaponVisual;
         private readonly List<BalatroCardVisual> _stackedMonsterVisuals = new List<BalatroCardVisual>();
         private BalatroCardVisual _consumablePotionVisual;
+        private BalatroCardVisual _consumableOfeVisual;
+        private BalatroCardVisual _consumableShieldVisual;
         private int _selectedMonsterSlot = -1;
         private bool _isBound;
 
@@ -171,6 +187,34 @@ namespace Scoundrel
             newRunLegendaryNftButton = restartNftBtn;
         }
 
+        public void ConfigureMarketplaceAndConsumables(
+            MarketplaceModalUI marketModal,
+            Button marketBtn,
+            RectTransform ofeHolder,
+            Image ofeAura,
+            TextMeshProUGUI ofeCountText,
+            Button ofeUseBtn,
+            TextMeshProUGUI ofeUseBtnText,
+            RectTransform shieldHolder,
+            Image shieldAura,
+            TextMeshProUGUI shieldCountText,
+            Button shieldUseBtn,
+            TextMeshProUGUI shieldUseBtnText)
+        {
+            marketplaceModal = marketModal;
+            openMarketButton = marketBtn;
+            ofeCardHolder = ofeHolder;
+            ofeCyanAura = ofeAura;
+            ofeCountBadgeText = ofeCountText;
+            useOfeButton = ofeUseBtn;
+            useOfeButtonText = ofeUseBtnText;
+            rustyShieldCardHolder = shieldHolder;
+            rustyShieldAmberAura = shieldAura;
+            rustyShieldCountBadgeText = shieldCountText;
+            useRustyShieldButton = shieldUseBtn;
+            useRustyShieldButtonText = shieldUseBtnText;
+        }
+
         private void Awake()
         {
             if (gameManager == null)
@@ -224,6 +268,12 @@ namespace Scoundrel
 
         private void WireButtons()
         {
+            if (openMarketButton != null)
+            {
+                openMarketButton.onClick.RemoveAllListeners();
+                openMarketButton.onClick.AddListener(OnOpenMarketClicked);
+            }
+
             if (avoidRoomButton != null)
             {
                 avoidRoomButton.onClick.RemoveAllListeners();
@@ -234,6 +284,18 @@ namespace Scoundrel
             {
                 useEpicPotionButton.onClick.RemoveAllListeners();
                 useEpicPotionButton.onClick.AddListener(OnUseEpicPotionClicked);
+            }
+
+            if (useOfeButton != null)
+            {
+                useOfeButton.onClick.RemoveAllListeners();
+                useOfeButton.onClick.AddListener(OnUseOfeClicked);
+            }
+
+            if (useRustyShieldButton != null)
+            {
+                useRustyShieldButton.onClick.RemoveAllListeners();
+                useRustyShieldButton.onClick.AddListener(OnUseRustyShieldClicked);
             }
 
             if (useWeaponButton != null)
@@ -276,6 +338,7 @@ namespace Scoundrel
             gameManager.OnRoomDealt += HandleRoomDealt;
             gameManager.OnRoomAvoided += HandleRoomAvoided;
             gameManager.OnEpicPotionActivated += HandleEpicPotionActivated;
+            gameManager.OnMarketplaceItemActivated += HandleMarketplaceItemActivated;
             gameManager.OnGameOver += HandleGameOver;
 
             if (gameManager.Bridge != null)
@@ -286,6 +349,11 @@ namespace Scoundrel
             if (spoilsModal != null)
             {
                 spoilsModal.Bind(gameManager);
+            }
+
+            if (marketplaceModal != null)
+            {
+                marketplaceModal.Bind(gameManager);
             }
         }
 
@@ -298,6 +366,7 @@ namespace Scoundrel
             gameManager.OnRoomDealt -= HandleRoomDealt;
             gameManager.OnRoomAvoided -= HandleRoomAvoided;
             gameManager.OnEpicPotionActivated -= HandleEpicPotionActivated;
+            gameManager.OnMarketplaceItemActivated -= HandleMarketplaceItemActivated;
             gameManager.OnGameOver -= HandleGameOver;
 
             if (gameManager.Bridge != null)
@@ -308,13 +377,32 @@ namespace Scoundrel
 
         private void EnsureConsumableVisual()
         {
-            if (consumableCardHolder == null || _consumablePotionVisual != null) return;
+            if (consumableCardHolder != null && _consumablePotionVisual == null)
+            {
+                Sprite epicSprite = ScoundrelResources.LoadSprite(ScoundrelAssetPaths.CardEpicPotion);
+                _consumablePotionVisual = BalatroCardVisual.CreateCardVisual(consumableCardHolder, consumableCardSize, sharedFoilMaterial);
+                _consumablePotionVisual.RectTransform.anchoredPosition = Vector2.zero;
+                _consumablePotionVisual.SetupCustomSprite(epicSprite, true, false, sharedFoilMaterial);
+                _consumablePotionVisual.OnCardClicked += _ => OnUseEpicPotionClicked();
+            }
 
-            Sprite epicSprite = ScoundrelResources.LoadSprite(ScoundrelAssetPaths.CardEpicPotion);
-            _consumablePotionVisual = BalatroCardVisual.CreateCardVisual(consumableCardHolder, consumableCardSize, sharedFoilMaterial);
-            _consumablePotionVisual.RectTransform.anchoredPosition = Vector2.zero;
-            _consumablePotionVisual.SetupCustomSprite(epicSprite, true, false, sharedFoilMaterial);
-            _consumablePotionVisual.OnCardClicked += _ => OnUseEpicPotionClicked();
+            if (ofeCardHolder != null && _consumableOfeVisual == null)
+            {
+                Sprite ofeSprite = ScoundrelResources.LoadOfeCharmSprite();
+                _consumableOfeVisual = BalatroCardVisual.CreateCardVisual(ofeCardHolder, consumableCardSize, sharedFoilMaterial);
+                _consumableOfeVisual.RectTransform.anchoredPosition = Vector2.zero;
+                _consumableOfeVisual.SetupCustomSprite(ofeSprite, true, false, sharedFoilMaterial);
+                _consumableOfeVisual.OnCardClicked += _ => OnUseOfeClicked();
+            }
+
+            if (rustyShieldCardHolder != null && _consumableShieldVisual == null)
+            {
+                Sprite shieldSprite = ScoundrelResources.LoadRustyShieldSprite();
+                _consumableShieldVisual = BalatroCardVisual.CreateCardVisual(rustyShieldCardHolder, consumableCardSize, sharedFoilMaterial);
+                _consumableShieldVisual.RectTransform.anchoredPosition = Vector2.zero;
+                _consumableShieldVisual.SetupCustomSprite(shieldSprite, false, false, sharedFoilMaterial);
+                _consumableShieldVisual.OnCardClicked += _ => OnUseRustyShieldClicked();
+            }
         }
 
         private void HandleBridgeStatusChanged(string statusMsg)
@@ -343,25 +431,38 @@ namespace Scoundrel
                     : new Color(0.96f, 0.34f, 0.16f, 1f);
             }
 
-            // 2. Active Epic Potion Echo Badge
+            // 2. Active Consumable Buffs Badge (Epic Potion Echo / Ofe Dodge / Rusty Shield)
             if (epicEchoBadgeRoot != null && epicEchoBadgeText != null)
             {
+                List<string> activeBuffParts = new List<string>(3);
                 if (state.EpicPotionBuffRoomsLeft > 0)
                 {
-                    epicEchoBadgeRoot.SetActive(true);
                     float echoPreview = (state.FirstPotionHealedTenths / 10) / 10f;
-                    string previewPart = echoPreview > 0f ? $" (+{echoPreview:0.0} HP)" : "";
-                    epicEchoBadgeText.text = $"+10% Potion Echo: {state.EpicPotionBuffRoomsLeft} Room{(state.EpicPotionBuffRoomsLeft == 1 ? "" : "s")} Left{previewPart}";
+                    string previewPart = echoPreview > 0f ? $" (+{echoPreview:0.0})" : "";
+                    activeBuffParts.Add($"Echo: {state.EpicPotionBuffRoomsLeft}R{previewPart}");
+                }
+                if (state.OfeBuffRoomsLeft > 0)
+                {
+                    activeBuffParts.Add($"Ofe Dodge (50%): {state.OfeBuffRoomsLeft}R");
+                }
+                if (state.RustyShieldBuffRoomsLeft > 0)
+                {
+                    activeBuffParts.Add($"Shield (-50%): {state.RustyShieldBuffRoomsLeft}R");
+                }
+
+                epicEchoBadgeRoot.SetActive(true);
+                if (activeBuffParts.Count > 0)
+                {
+                    epicEchoBadgeText.text = string.Join("  •  ", activeBuffParts);
                     epicEchoBadgeText.color = new Color(1.0f, 0.90f, 0.42f, 1f);
                     if (epicEchoBadgeBg != null)
                     {
-                        epicEchoBadgeBg.color = new Color(0.32f, 0.24f, 0.06f, 0.95f);
+                        epicEchoBadgeBg.color = new Color(0.28f, 0.22f, 0.06f, 0.96f);
                     }
                 }
                 else
                 {
-                    epicEchoBadgeRoot.SetActive(true);
-                    epicEchoBadgeText.text = "+10% Potion Echo: Inactive";
+                    epicEchoBadgeText.text = "Active Buffs: None";
                     epicEchoBadgeText.color = new Color(0.55f, 0.60f, 0.68f, 0.8f);
                     if (epicEchoBadgeBg != null)
                     {
@@ -427,42 +528,40 @@ namespace Scoundrel
                     : new Color(1f, 1f, 1f, 0.22f);
             }
 
-            // 7. Balatro-Style Epic Health Potion Consumable Slot
+            // 7. 3-Slot Balatro-Style Consumable Rack (Epic Health Potion, Ofe Charm, Rusty Shield)
             EnsureConsumableVisual();
-            if (_consumablePotionVisual != null)
-            {
-                bool hasPotion = state.EpicPotionsInventory > 0;
-                _consumablePotionVisual.gameObject.SetActive(true);
-                _consumablePotionVisual.IsInteractable = state.CanUseEpicPotion;
-                CanvasGroup cg = _consumablePotionVisual.GetComponent<CanvasGroup>();
-                if (cg != null)
-                {
-                    cg.alpha = hasPotion ? 1f : 0.28f;
-                }
-            }
-            if (consumableCountBadgeText != null)
-            {
-                consumableCountBadgeText.text = $"x{state.EpicPotionsInventory}";
-            }
-            if (useEpicPotionButton != null)
-            {
-                useEpicPotionButton.interactable = state.CanUseEpicPotion;
-                if (useEpicPotionButtonText != null)
-                {
-                    if (state.EpicPotionBuffRoomsLeft > 0)
-                        useEpicPotionButtonText.text = $"ACTIVE ({state.EpicPotionBuffRoomsLeft}R)";
-                    else if (state.EpicPotionsInventory > 0)
-                        useEpicPotionButtonText.text = "USE";
-                    else
-                        useEpicPotionButtonText.text = "EMPTY";
-                }
-            }
-            if (consumableGoldenAura != null && state.EpicPotionBuffRoomsLeft == 0)
-            {
-                consumableGoldenAura.color = state.CanUseEpicPotion
-                    ? new Color(1f, 0.84f, 0.28f, 0.25f)
-                    : new Color(1f, 0.84f, 0.28f, 0f);
-            }
+            RefreshSingleConsumableSlot(
+                _consumablePotionVisual,
+                state.EpicPotionsInventory,
+                state.EpicPotionBuffRoomsLeft,
+                state.CanUseEpicPotion,
+                consumableCountBadgeText,
+                useEpicPotionButton,
+                useEpicPotionButtonText,
+                consumableGoldenAura,
+                new Color(1f, 0.84f, 0.28f, 0.28f));
+
+            RefreshSingleConsumableSlot(
+                _consumableOfeVisual,
+                state.OfeInventory,
+                state.OfeBuffRoomsLeft,
+                state.CanUseOfe,
+                ofeCountBadgeText,
+                useOfeButton,
+                useOfeButtonText,
+                ofeCyanAura,
+                new Color(0.28f, 0.94f, 1f, 0.28f));
+
+            RefreshSingleConsumableSlot(
+                _consumableShieldVisual,
+                state.RustyShieldInventory,
+                state.RustyShieldBuffRoomsLeft,
+                state.CanUseRustyShield,
+                rustyShieldCountBadgeText,
+                useRustyShieldButton,
+                useRustyShieldButtonText,
+                rustyShieldAmberAura,
+                new Color(1f, 0.78f, 0.28f, 0.28f));
 
             // 8. Equipped Weapon Badge ("Can Slay <= X") & Forged Edge Upgrade Sync
             if (weaponEmptyPlaceholder != null)
@@ -505,6 +604,53 @@ namespace Scoundrel
             {
                 SpoilsTier previewTier = ScoundrelCardDecoder.EvaluateSpoilsTier(state.RoomThreatAccumulator);
                 roomThreatLiveText.text = $"Room Threat T: {state.RoomThreatAccumulator} ({previewTier})  •  Resolved: {state.CardsResolvedInRoom}/3";
+            }
+        }
+
+        private static void RefreshSingleConsumableSlot(
+            BalatroCardVisual visual,
+            byte inventoryCount,
+            byte buffRoomsLeft,
+            bool canUse,
+            TextMeshProUGUI countBadgeText,
+            Button useButton,
+            TextMeshProUGUI useButtonText,
+            Image auraImage,
+            Color readyAuraColor)
+        {
+            if (visual != null)
+            {
+                bool hasOrActive = inventoryCount > 0 || buffRoomsLeft > 0;
+                visual.gameObject.SetActive(true);
+                visual.IsInteractable = canUse;
+                CanvasGroup cg = visual.GetComponent<CanvasGroup>();
+                if (cg != null)
+                {
+                    cg.alpha = hasOrActive ? 1f : 0.28f;
+                }
+            }
+            if (countBadgeText != null)
+            {
+                countBadgeText.text = $"x{inventoryCount}";
+            }
+            if (useButton != null)
+            {
+                useButton.interactable = canUse;
+                if (useButtonText != null)
+                {
+                    if (buffRoomsLeft > 0)
+                        useButtonText.text = $"ACTIVE ({buffRoomsLeft}R)";
+                    else if (inventoryCount > 0)
+                        useButtonText.text = "USE";
+                    else
+                        useButtonText.text = "EMPTY";
+                }
+            }
+            if (auraImage != null && buffRoomsLeft == 0)
+            {
+                auraImage.color = canUse
+                    ? readyAuraColor
+                    : new Color(readyAuraColor.r, readyAuraColor.g, readyAuraColor.b, 0f);
             }
         }
 
@@ -758,9 +904,10 @@ namespace Scoundrel
                     }
                     else
                     {
+                        string shieldSuffix = state.RustyShieldBuffRoomsLeft > 0 ? " • 50% SHIELD" : "";
                         useWeaponButtonText.text = usesForged
-                            ? $"USE WEAPON (-{chip}.0 HP • FORGED EDGE!)"
-                            : $"USE WEAPON (-{chip}.0 HP CHIP)";
+                            ? $"USE WEAPON (-{chip}.0 HP • FORGED EDGE{shieldSuffix}!)"
+                            : $"USE WEAPON (-{chip}.0 HP CHIP{shieldSuffix})";
                     }
                 }
                 else if (state.EquippedWeaponRank == 0)
@@ -776,7 +923,18 @@ namespace Scoundrel
 
             if (fightBarehandedButtonText != null)
             {
-                fightBarehandedButtonText.text = $"FIGHT BAREHANDED (-{monster.Rank}.0 HP)";
+                if (state.OfeBuffRoomsLeft > 0)
+                {
+                    fightBarehandedButtonText.text = $"FIGHT BAREHANDED (-{monster.Rank}.0 HP • 50% OFE DODGE!)";
+                }
+                else if (state.RustyShieldBuffRoomsLeft > 0)
+                {
+                    fightBarehandedButtonText.text = $"FIGHT BAREHANDED (-{monster.Rank}.0 HP • 50% SHIELD!)";
+                }
+                else
+                {
+                    fightBarehandedButtonText.text = $"FIGHT BAREHANDED (-{monster.Rank}.0 HP)";
+                }
             }
         }
 
@@ -852,6 +1010,14 @@ namespace Scoundrel
             }
         }
 
+        private void OnOpenMarketClicked()
+        {
+            if (marketplaceModal != null)
+            {
+                marketplaceModal.ShowModal();
+            }
+        }
+
         private void OnAvoidRoomClicked()
         {
             if (gameManager == null) return;
@@ -868,22 +1034,59 @@ namespace Scoundrel
             gameManager.TryUseEpicPotion();
         }
 
+        private void OnUseOfeClicked()
+        {
+            if (gameManager == null) return;
+            if (_consumableOfeVisual != null)
+            {
+                WeaponSkinFXController.Instance?.SetNextActionWorldPosition(_consumableOfeVisual.transform.position);
+            }
+            gameManager.UseMarketplaceItem((int)MarketplaceItemId.OfeCharm);
+        }
+
+        private void OnUseRustyShieldClicked()
+        {
+            if (gameManager == null) return;
+            if (_consumableShieldVisual != null)
+            {
+                WeaponSkinFXController.Instance?.SetNextActionWorldPosition(_consumableShieldVisual.transform.position);
+            }
+            gameManager.UseMarketplaceItem((int)MarketplaceItemId.RustyShield);
+        }
+
         private void HandleEpicPotionActivated(int roomsRemaining)
         {
-            if (_consumablePotionVisual != null)
+            PulseConsumableVisualAndAura(_consumablePotionVisual, consumableGoldenAura, new Color(1f, 0.86f, 0.25f, 0.92f));
+        }
+
+        private void HandleMarketplaceItemActivated(int itemId, int roomsRemaining)
+        {
+            if (itemId == (int)MarketplaceItemId.OfeCharm)
             {
-                _consumablePotionVisual.RectTransform.DOKill();
-                _consumablePotionVisual.RectTransform.DOPunchScale(new Vector3(0.22f, 0.22f, 0f), 0.38f, 8, 0.85f);
+                PulseConsumableVisualAndAura(_consumableOfeVisual, ofeCyanAura, new Color(0.28f, 0.94f, 1f, 0.92f));
+            }
+            else if (itemId == (int)MarketplaceItemId.RustyShield)
+            {
+                PulseConsumableVisualAndAura(_consumableShieldVisual, rustyShieldAmberAura, new Color(1f, 0.78f, 0.28f, 0.92f));
+            }
+        }
+
+        private void PulseConsumableVisualAndAura(BalatroCardVisual visual, Image aura, Color activeColor)
+        {
+            if (visual != null)
+            {
+                visual.RectTransform.DOKill();
+                visual.RectTransform.DOPunchScale(new Vector3(0.22f, 0.22f, 0f), 0.38f, 8, 0.85f);
             }
 
-            if (consumableGoldenAura != null)
+            if (aura != null)
             {
-                consumableGoldenAura.DOKill();
-                consumableGoldenAura.rectTransform.DOKill();
-                consumableGoldenAura.color = new Color(1f, 0.86f, 0.25f, 0.92f);
-                consumableGoldenAura.rectTransform.localScale = Vector3.one * 0.85f;
-                consumableGoldenAura.rectTransform.DOScale(1.38f, 0.48f).SetEase(Ease.OutCubic);
-                consumableGoldenAura.DOFade(0.32f, 0.55f).SetEase(Ease.OutQuad);
+                aura.DOKill();
+                aura.rectTransform.DOKill();
+                aura.color = activeColor;
+                aura.rectTransform.localScale = Vector3.one * 0.85f;
+                aura.rectTransform.DOScale(1.32f, 0.46f).SetEase(Ease.OutCubic);
+                aura.DOFade(0.34f, 0.52f).SetEase(Ease.OutQuad);
             }
 
             if (epicEchoBadgeRoot != null)
@@ -900,6 +1103,10 @@ namespace Scoundrel
             if (spoilsModal != null)
             {
                 spoilsModal.HideImmediate();
+            }
+            if (marketplaceModal != null)
+            {
+                marketplaceModal.HideImmediate();
             }
 
             DOVirtual.DelayedCall(0.45f, () =>
@@ -965,6 +1172,10 @@ namespace Scoundrel
             if (spoilsModal != null)
             {
                 spoilsModal.HideImmediate();
+            }
+            if (marketplaceModal != null)
+            {
+                marketplaceModal.HideImmediate();
             }
 
             // Clean up all tabletop card visuals before fresh deal

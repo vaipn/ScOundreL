@@ -30,6 +30,63 @@ namespace Scoundrel.EditorTools
             Debug.Log($"[DungeonTabletopBuilder] {summary}");
         }
 
+        public static void BuildAndVerifyAll()
+        {
+            string buildSummary = BuildDungeonTabletopCommand();
+            Debug.Log($"[DungeonTabletopBuilder] {buildSummary}");
+            string verifySummary = VerifyVrfMarketplaceCommand();
+            Debug.Log($"[DungeonTabletopBuilder] {verifySummary}");
+        }
+
+        [CliCommand("scoundrel", "verify_vrf_marketplace", "Verify MagicBlock VRF deck shuffle/combat rolls, Borsh DungeonRun deserialization, and Mini Marketplace UI")]
+        public static string VerifyVrfMarketplaceCommand()
+        {
+            ScoundrelGameManager gm = UnityEngine.Object.FindFirstObjectByType<ScoundrelGameManager>();
+            ScoundrelTabletopUIController ui = UnityEngine.Object.FindFirstObjectByType<ScoundrelTabletopUIController>();
+            MarketplaceModalUI market = UnityEngine.Object.FindFirstObjectByType<MarketplaceModalUI>(FindObjectsInactive.Include);
+            SpoilsModalUI spoils = UnityEngine.Object.FindFirstObjectByType<SpoilsModalUI>(FindObjectsInactive.Include);
+
+            if (gm == null || ui == null || market == null || spoils == null)
+            {
+                throw new Exception("Missing ScoundrelGameManager, ScoundrelTabletopUIController, MarketplaceModalUI, or SpoilsModalUI in scene.");
+            }
+
+            // 1. Start deterministic VRF run and verify 44 unique cards
+            gm.StartNewRun(123456789UL, false);
+            HashSet<byte> unique = new HashSet<byte>(gm.State.Deck);
+            if (unique.Count != 44 || gm.State.VrfSeed == null || gm.State.VrfSeed.Length != 32)
+            {
+                throw new Exception($"Invalid VRF deck or seed length ({unique.Count}, {gm.State.VrfSeed?.Length ?? 0}).");
+            }
+
+            // 2. Grant 150 Gold and test buying Ofe Charm (60G) and Rusty Shield (45G)
+            gm.State.UnclaimedGold = 150;
+            bool boughtOfe = gm.BuyItem((int)MarketplaceItemId.OfeCharm);
+            bool boughtShield = gm.BuyItem((int)MarketplaceItemId.RustyShield);
+            if (!boughtOfe || !boughtShield || gm.State.UnclaimedGold != 45 || gm.State.OfeInventory != 1 || gm.State.RustyShieldInventory != 1)
+            {
+                throw new Exception($"Marketplace purchase mismatch: Gold={gm.State.UnclaimedGold}, Ofe={gm.State.OfeInventory}, Shield={gm.State.RustyShieldInventory}");
+            }
+
+            // 3. Activate both Ofe and Rusty Shield (3 rooms each)
+            bool usedOfe = gm.UseMarketplaceItem((int)MarketplaceItemId.OfeCharm);
+            bool usedShield = gm.UseMarketplaceItem((int)MarketplaceItemId.RustyShield);
+            if (!usedOfe || !usedShield || gm.State.OfeBuffRoomsLeft != 3 || gm.State.RustyShieldBuffRoomsLeft != 3)
+            {
+                throw new Exception($"Marketplace activation mismatch: OfeBuff={gm.State.OfeBuffRoomsLeft}, ShieldBuff={gm.State.RustyShieldBuffRoomsLeft}");
+            }
+
+            // 4. Open & close MarketplaceModalUI cleanly
+            market.ShowModal();
+            market.HideImmediate();
+
+            // 5. Reset to clean fresh run for Play Mode
+            gm.StartNewRun(null, false);
+            ui.RefreshHUD(gm.State);
+
+            return "Verified VRF 32-byte deck shuffle, Ofe (60G) & Rusty Shield (45G) purchases/activations, and MarketplaceModalUI + 3-Slot Consumable Rack.";
+        }
+
         [CliCommand("scoundrel", "build_scene", "Configure Resources manifest, Bilinear FullRect sprite pipeline, and build Assets/Scenes/DungeonTabletop.unity")]
         public static string BuildDungeonTabletopCommand()
         {
@@ -124,7 +181,7 @@ namespace Scoundrel.EditorTools
 
             // 1. Player HP Bar ("20.0 / 20 HP")
             RectTransform hpContainer = CreateAnchoredRect("PlayerHPContainer", topHud,
-                new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(235f, 0f), new Vector2(416f, 56f));
+                new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(215f, 0f), new Vector2(390f, 56f));
             Image hpFrame = hpContainer.gameObject.AddComponent<Image>();
             hpFrame.sprite = uiWhiteSprite;
             hpFrame.color = new Color(0.11f, 0.14f, 0.20f, 1f);
@@ -150,22 +207,22 @@ namespace Scoundrel.EditorTools
                 "20.0 / 20 HP", 24f, FontStyles.Bold, TextAlignmentOptions.Center, Color.white);
             StretchFull(hpValueText.rectTransform);
 
-            // 2. Active Epic Potion Echo Badge ("+10% Potion Echo: X Rooms Left")
+            // 2. Active Consumable Buffs Badge (Epic Potion Echo / Ofe Dodge / Rusty Shield)
             RectTransform echoBadgeRect = CreateAnchoredRect("EpicPotionEchoBadge", topHud,
-                new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(692f, 0f), new Vector2(456f, 54f));
+                new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(638f, 0f), new Vector2(422f, 54f));
             Image echoBadgeBg = echoBadgeRect.gameObject.AddComponent<Image>();
             echoBadgeBg.sprite = uiWhiteSprite;
             echoBadgeBg.color = new Color(0.10f, 0.13f, 0.18f, 0.85f);
             AddOutline(echoBadgeRect.gameObject, new Color(0.85f, 0.68f, 0.24f, 0.55f), 1.5f);
 
             TextMeshProUGUI echoBadgeText = CreateTMP("EpicEchoBadgeText", echoBadgeRect, fontAsset,
-                "+10% Potion Echo: Inactive", 19f, FontStyles.Bold, TextAlignmentOptions.Center,
+                "Active Buffs: None", 17f, FontStyles.Bold, TextAlignmentOptions.Center,
                 new Color(0.62f, 0.68f, 0.76f, 0.9f));
             StretchFull(echoBadgeText.rectTransform, 10f, 4f);
 
             // 3. Accumulated SPL Gold + Session Signer Status
             RectTransform goldBadgeRect = CreateAnchoredRect("GoldCounterPanel", topHud,
-                new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(1140f, 0f), new Vector2(390f, 56f));
+                new Vector2(0f, 0.5f), new Vector2(0f, 0.5f), new Vector2(1055f, 0f), new Vector2(378f, 56f));
             Image goldBg = goldBadgeRect.gameObject.AddComponent<Image>();
             goldBg.sprite = uiWhiteSprite;
             goldBg.color = new Color(0.11f, 0.14f, 0.20f, 0.95f);
@@ -186,31 +243,40 @@ namespace Scoundrel.EditorTools
             goldValueText.rectTransform.offsetMax = new Vector2(-12f, -4f);
 
             TextMeshProUGUI sessionStatusText = CreateTMP("SessionKeyStatusText", goldBadgeRect, fontAsset,
-                "Session Key Active • Local Optimistic", 13f, FontStyles.Normal, TextAlignmentOptions.Left,
+                "MagicBlock VRF Seeded • Local Sim", 12.5f, FontStyles.Normal, TextAlignmentOptions.Left,
                 new Color(0.52f, 0.86f, 0.76f, 0.92f));
             sessionStatusText.rectTransform.anchorMin = new Vector2(0f, 0f);
             sessionStatusText.rectTransform.anchorMax = new Vector2(1f, 0.42f);
             sessionStatusText.rectTransform.offsetMin = new Vector2(64f, 4f);
             sessionStatusText.rectTransform.offsetMax = new Vector2(-12f, 0f);
 
-            // 4. Avoid Room Button (Right side of Top HUD)
+            // 4. Merchant Button (Opens Mini Marketplace Modal)
+            Button openMarketBtn = CreateStyledButton("MarketButton", topHud, fontAsset, uiWhiteSprite,
+                new Vector2(0f, 0.5f), new Vector2(1366f, 0f), new Vector2(204f, 56f),
+                "MERCHANT", 19f,
+                new Color(0.76f, 0.52f, 0.14f, 1f),
+                new Color(0.92f, 0.66f, 0.20f, 1f),
+                new Color(0.18f, 0.18f, 0.22f, 0.8f),
+                out _);
+
+            // 5. Avoid Room Button (Right side of Top HUD)
             Button avoidRoomBtn = CreateStyledButton("AvoidRoomButton", topHud, fontAsset, uiWhiteSprite,
-                new Vector2(1f, 0.5f), new Vector2(-158f, 0f), new Vector2(262f, 56f),
-                "AVOID ROOM", 20f,
+                new Vector2(1f, 0.5f), new Vector2(-150f, 0f), new Vector2(248f, 56f),
+                "AVOID ROOM", 19f,
                 new Color(0.18f, 0.42f, 0.56f, 1f),
                 new Color(0.24f, 0.54f, 0.70f, 1f),
                 new Color(0.14f, 0.17f, 0.22f, 0.8f),
                 out TextMeshProUGUI avoidRoomBtnText);
 
             // =====================================================================
-            // B. CENTER TABLETOP (DungeonDeck, 4 RoomSlots, DiscardPile, Epic Consumable)
+            // B. CENTER TABLETOP (DungeonDeck, 4 RoomSlots, DiscardPile, 3-Slot Consumable Rack)
             // =====================================================================
             RectTransform centerTabletop = CreateAnchoredRect("CenterTabletop", shakeRoot,
                 new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0f, 92f), new Vector2(1820f, 390f));
 
             // 1. Left: DungeonDeck Pile + Remaining Count Badge
             RectTransform dungeonZone = CreateAnchoredRect("DungeonDeckZone", centerTabletop,
-                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(-756f, 0f), new Vector2(214f, 336f));
+                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(-786f, 0f), new Vector2(202f, 336f));
             CreatePileFrame(dungeonZone, fontAsset, uiWhiteSprite, "DUNGEON DECK", new Color(0.75f, 0.84f, 0.96f, 0.9f));
 
             RectTransform dungeonDeckAnchor = CreateAnchoredRect("DungeonDeck", dungeonZone,
@@ -224,7 +290,7 @@ namespace Scoundrel.EditorTools
 
             // 2. Center: 4 Horizontal RoomSlots
             RectTransform roomRow = CreateAnchoredRect("RoomSlotsContainer", centerTabletop,
-                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(-115f, 0f), new Vector2(930f, 336f));
+                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(-196f, 0f), new Vector2(900f, 336f));
 
             TextMeshProUGUI roomHeader = CreateTMP("RoomHeaderLabel", roomRow, fontAsset,
                 "ACTIVE DUNGEON ROOM  (RESOLVE 3 OF 4 CARDS)", 17f, FontStyles.Bold, TextAlignmentOptions.Center,
@@ -235,12 +301,12 @@ namespace Scoundrel.EditorTools
             roomHeader.rectTransform.sizeDelta = new Vector2(0f, 28f);
 
             RectTransform[] roomSlotAnchors = new RectTransform[4];
-            float[] slotX = { -336f, -112f, 112f, 336f };
+            float[] slotX = { -324f, -108f, 108f, 324f };
             string[] numerals = { "I", "II", "III", "IV" };
             for (int i = 0; i < 4; i++)
             {
                 RectTransform slotWell = CreateAnchoredRect($"RoomSlotWell_{i}", roomRow,
-                    new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(slotX[i], -12f), new Vector2(196f, 272f));
+                    new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(slotX[i], -12f), new Vector2(194f, 272f));
                 Image wellImg = slotWell.gameObject.AddComponent<Image>();
                 wellImg.sprite = uiWhiteSprite;
                 wellImg.color = new Color(0.055f, 0.085f, 0.125f, 0.78f);
@@ -259,7 +325,7 @@ namespace Scoundrel.EditorTools
 
             // 3. Right-Inner: DiscardPile
             RectTransform discardZone = CreateAnchoredRect("DiscardPileZone", centerTabletop,
-                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(510f, 0f), new Vector2(204f, 336f));
+                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(394f, 0f), new Vector2(198f, 336f));
             CreatePileFrame(discardZone, fontAsset, uiWhiteSprite, "DISCARD PILE", new Color(0.68f, 0.72f, 0.80f, 0.85f));
 
             RectTransform discardPileAnchor = CreateAnchoredRect("DiscardPile", discardZone,
@@ -272,43 +338,78 @@ namespace Scoundrel.EditorTools
             TextMeshProUGUI discardCountText = CreateCountBadge("DiscardCountBadge", discardPileAnchor, fontAsset, uiWhiteSprite,
                 "0", new Color(0.26f, 0.28f, 0.36f, 0.95f));
 
-            // 4. Right-Outer: Balatro-Style Consumable Slot (Epic Health Potion + USE Button)
+            // 4. Right-Outer: 3-Slot Balatro-Style Consumable Rack (Epic Potion, Ofe Charm, Rusty Shield)
             RectTransform consumableZone = CreateAnchoredRect("BalatroConsumableSlot", centerTabletop,
-                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(752f, 0f), new Vector2(228f, 348f));
+                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(706f, 0f), new Vector2(362f, 348f));
             Image consBg = consumableZone.gameObject.AddComponent<Image>();
             consBg.sprite = uiWhiteSprite;
             consBg.color = new Color(0.09f, 0.12f, 0.19f, 0.92f);
             AddOutline(consumableZone.gameObject, new Color(0.92f, 0.74f, 0.28f, 0.60f), 2f);
 
             TextMeshProUGUI consHeader = CreateTMP("ConsumableHeader", consumableZone, fontAsset,
-                "CONSUMABLE", 16f, FontStyles.Bold, TextAlignmentOptions.Center,
+                "CONSUMABLE RACK (3-ROOM BUFFS)", 14.5f, FontStyles.Bold, TextAlignmentOptions.Center,
                 new Color(0.98f, 0.84f, 0.38f, 0.95f));
             consHeader.rectTransform.anchorMin = new Vector2(0f, 1f);
             consHeader.rectTransform.anchorMax = new Vector2(1f, 1f);
-            consHeader.rectTransform.anchoredPosition = new Vector2(0f, -18f);
-            consHeader.rectTransform.sizeDelta = new Vector2(0f, 26f);
+            consHeader.rectTransform.anchoredPosition = new Vector2(0f, -17f);
+            consHeader.rectTransform.sizeDelta = new Vector2(0f, 24f);
 
-            RectTransform auraRect = CreateAnchoredRect("ConsumableGoldenAura", consumableZone,
-                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0f, 14f), new Vector2(166f, 218f));
-            Image consumableGoldenAura = auraRect.gameObject.AddComponent<Image>();
-            consumableGoldenAura.sprite = uiWhiteSprite;
-            consumableGoldenAura.color = new Color(1f, 0.84f, 0.28f, 0.22f);
-            consumableGoldenAura.raycastTarget = false;
-
-            RectTransform consumableCardHolder = CreateAnchoredRect("EpicPotionCardHolder", consumableZone,
-                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0f, 14f), new Vector2(132f, 186f));
-
-            TextMeshProUGUI consumableCountBadgeText = CreateCountBadge("ConsumableCountBadge", consumableZone, fontAsset, uiWhiteSprite,
-                "x1", new Color(0.55f, 0.38f, 0.08f, 0.96f));
-            consumableCountBadgeText.transform.parent.GetComponent<RectTransform>().anchoredPosition = new Vector2(-26f, 92f);
-
-            Button useEpicPotionBtn = CreateStyledButton("UseEpicPotionButton", consumableZone, fontAsset, uiWhiteSprite,
-                new Vector2(0.5f, 0f), new Vector2(0f, 32f), new Vector2(174f, 44f),
-                "USE", 20f,
+            BuildConsumableSubSlot(
+                "EpicPotionSubSlot",
+                consumableZone,
+                fontAsset,
+                uiWhiteSprite,
+                -114f,
+                "ELIXIR",
+                new Color(1f, 0.84f, 0.28f, 0.24f),
+                new Color(0.55f, 0.38f, 0.08f, 0.96f),
                 new Color(0.82f, 0.58f, 0.12f, 1f),
                 new Color(0.96f, 0.72f, 0.18f, 1f),
-                new Color(0.18f, 0.20f, 0.26f, 0.8f),
+                "x1",
+                "USE",
+                out RectTransform consumableCardHolder,
+                out Image consumableGoldenAura,
+                out TextMeshProUGUI consumableCountBadgeText,
+                out Button useEpicPotionBtn,
                 out TextMeshProUGUI useEpicPotionBtnText);
+
+            BuildConsumableSubSlot(
+                "OfeCharmSubSlot",
+                consumableZone,
+                fontAsset,
+                uiWhiteSprite,
+                0f,
+                "OFE (50%)",
+                new Color(0.28f, 0.94f, 1f, 0.24f),
+                new Color(0.10f, 0.44f, 0.56f, 0.96f),
+                new Color(0.14f, 0.56f, 0.72f, 1f),
+                new Color(0.20f, 0.70f, 0.88f, 1f),
+                "x0",
+                "EMPTY",
+                out RectTransform ofeCardHolder,
+                out Image ofeCyanAura,
+                out TextMeshProUGUI ofeCountBadgeText,
+                out Button useOfeBtn,
+                out TextMeshProUGUI useOfeBtnText);
+
+            BuildConsumableSubSlot(
+                "RustyShieldSubSlot",
+                consumableZone,
+                fontAsset,
+                uiWhiteSprite,
+                114f,
+                "SHIELD",
+                new Color(1f, 0.78f, 0.28f, 0.24f),
+                new Color(0.46f, 0.34f, 0.16f, 0.96f),
+                new Color(0.68f, 0.48f, 0.18f, 1f),
+                new Color(0.84f, 0.60f, 0.24f, 1f),
+                "x0",
+                "EMPTY",
+                out RectTransform rustyShieldCardHolder,
+                out Image rustyShieldAmberAura,
+                out TextMeshProUGUI rustyShieldCountBadgeText,
+                out Button useRustyShieldBtn,
+                out TextMeshProUGUI useRustyShieldBtnText);
 
             // =====================================================================
             // C. BOTTOM PLAY AREA (EquippedWeaponSlot + Staggered Stack + Shield Badge + Combat Prompt)
@@ -501,6 +602,135 @@ namespace Scoundrel.EditorTools
                 lootCardButtons[i] = CreateSpoilsLootCard($"SpoilsLootCard_{i}", lootCardsRow, fontAsset, uiWhiteSprite);
             }
 
+            Button visitMerchantBtn = CreateStyledButton("VisitMerchantButton", spoilsModalPanel, fontAsset, uiWhiteSprite,
+                new Vector2(1f, 1f), new Vector2(-156f, -44f), new Vector2(248f, 44f),
+                "VISIT MERCHANT", 17f,
+                new Color(0.76f, 0.52f, 0.14f, 1f),
+                new Color(0.92f, 0.66f, 0.20f, 1f),
+                new Color(0.20f, 0.20f, 0.24f, 0.8f),
+                out _);
+
+            // =====================================================================
+            // E2. MINI MARKETPLACE MODAL OVERLAY (OFE CHARM & RUSTY SHIELD)
+            // =====================================================================
+            RectTransform marketRoot = CreateFullStretchRect("MarketplaceModal", canvasGo.transform);
+            Image marketBackdropImg = marketRoot.gameObject.AddComponent<Image>();
+            marketBackdropImg.sprite = uiWhiteSprite;
+            marketBackdropImg.color = new Color(0.02f, 0.04f, 0.08f, 0.88f);
+            CanvasGroup marketBackdropGroup = marketRoot.gameObject.AddComponent<CanvasGroup>();
+
+            RectTransform marketModalPanel = CreateAnchoredRect("MarketplaceModalPanel", marketRoot,
+                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(1180f, 680f));
+            Image marketPanelImg = marketModalPanel.gameObject.AddComponent<Image>();
+            marketPanelImg.sprite = uiWhiteSprite;
+            marketPanelImg.color = new Color(0.072f, 0.102f, 0.158f, 0.99f);
+            AddOutline(marketModalPanel.gameObject, new Color(0.95f, 0.76f, 0.28f, 0.88f), 3f);
+
+            RectTransform marketGoldPill = CreateAnchoredRect("MarketplaceGoldPill", marketModalPanel,
+                new Vector2(0.5f, 1f), new Vector2(0.5f, 1f), new Vector2(0f, -42f), new Vector2(460f, 44f));
+            Image marketGoldPillBg = marketGoldPill.gameObject.AddComponent<Image>();
+            marketGoldPillBg.sprite = uiWhiteSprite;
+            marketGoldPillBg.color = new Color(0.22f, 0.16f, 0.05f, 0.96f);
+            AddOutline(marketGoldPill.gameObject, new Color(0.96f, 0.78f, 0.26f, 0.75f), 1.5f);
+
+            TextMeshProUGUI marketGoldBalanceText = CreateTMP("MarketplaceGoldBalanceText", marketGoldPill, fontAsset,
+                "AVAILABLE TREASURY: 0 SPL GOLD", 19f, FontStyles.Bold, TextAlignmentOptions.Center,
+                new Color(1f, 0.88f, 0.36f, 1f));
+            StretchFull(marketGoldBalanceText.rectTransform);
+
+            TextMeshProUGUI marketHeaderTitle = CreateTMP("MarketplaceHeaderTitle", marketModalPanel, fontAsset,
+                "DUNGEON MERCHANT — MINI MARKETPLACE", 36f, FontStyles.Bold, TextAlignmentOptions.Center,
+                new Color(0.98f, 0.82f, 0.28f, 1f));
+            marketHeaderTitle.rectTransform.anchorMin = new Vector2(0f, 1f);
+            marketHeaderTitle.rectTransform.anchorMax = new Vector2(1f, 1f);
+            marketHeaderTitle.rectTransform.anchoredPosition = new Vector2(0f, -96f);
+            marketHeaderTitle.rectTransform.sizeDelta = new Vector2(-80f, 48f);
+
+            TextMeshProUGUI marketSubtitle = CreateTMP("MarketplaceSubtitle", marketModalPanel, fontAsset,
+                "Spend Unclaimed SPL Gold on VRF-Seeded 3-Room Consumables • Activate Anytime from Your Rack", 18.5f,
+                FontStyles.Normal, TextAlignmentOptions.Center, new Color(0.80f, 0.86f, 0.94f, 0.95f));
+            marketSubtitle.rectTransform.anchorMin = new Vector2(0f, 1f);
+            marketSubtitle.rectTransform.anchorMax = new Vector2(1f, 1f);
+            marketSubtitle.rectTransform.anchoredPosition = new Vector2(0f, -138f);
+            marketSubtitle.rectTransform.sizeDelta = new Vector2(-80f, 32f);
+
+            Button closeMarketBtn = CreateStyledButton("CloseMarketplaceButton", marketModalPanel, fontAsset, uiWhiteSprite,
+                new Vector2(1f, 1f), new Vector2(-88f, -42f), new Vector2(124f, 44f),
+                "CLOSE", 18f,
+                new Color(0.24f, 0.28f, 0.38f, 1f),
+                new Color(0.34f, 0.40f, 0.52f, 1f),
+                new Color(0.16f, 0.18f, 0.22f, 0.8f),
+                out _);
+
+            CreateMerchantItemCard(
+                "OfeMerchantCard",
+                marketModalPanel,
+                fontAsset,
+                uiWhiteSprite,
+                new Vector2(-270f, -58f),
+                "YORUBA VANISHING CHARM",
+                "OFE CHARM",
+                "50% MagicBlock VRF chance to vanish and take 0 damage when fighting barehanded.\nLasts for 3 completed rooms once activated.",
+                "Owned in Rack: x0",
+                "BUY (60 GOLD)",
+                new Color(0.32f, 0.94f, 1.00f, 1f),
+                new Color(0.14f, 0.52f, 0.68f, 1f),
+                new Color(0.20f, 0.68f, 0.86f, 1f),
+                out RectTransform ofeMerchantCardRect,
+                out RectTransform ofeMerchantVisualHolder,
+                out TextMeshProUGUI ofeMerchantTitle,
+                out TextMeshProUGUI ofeMerchantDesc,
+                out TextMeshProUGUI ofeMerchantOwned,
+                out Button buyOfeBtn,
+                out TextMeshProUGUI buyOfeBtnText);
+
+            CreateMerchantItemCard(
+                "RustyShieldMerchantCard",
+                marketModalPanel,
+                fontAsset,
+                uiWhiteSprite,
+                new Vector2(270f, -58f),
+                "IRONBOUND BUCKLER",
+                "RUSTY SHIELD",
+                "50% MagicBlock VRF chance to block half (-50%) of incoming monster damage (weapon chip or barehanded).\nLasts for 3 completed rooms once activated.",
+                "Owned in Rack: x0",
+                "BUY (45 GOLD)",
+                new Color(1.00f, 0.78f, 0.28f, 1f),
+                new Color(0.72f, 0.48f, 0.14f, 1f),
+                new Color(0.88f, 0.62f, 0.20f, 1f),
+                out RectTransform shieldMerchantCardRect,
+                out RectTransform shieldMerchantVisualHolder,
+                out TextMeshProUGUI shieldMerchantTitle,
+                out TextMeshProUGUI shieldMerchantDesc,
+                out TextMeshProUGUI shieldMerchantOwned,
+                out Button buyShieldBtn,
+                out TextMeshProUGUI buyShieldBtnText);
+
+            MarketplaceModalUI marketplaceModal = marketRoot.gameObject.AddComponent<MarketplaceModalUI>();
+            marketplaceModal.ConfigureReferences(
+                gameManager,
+                marketBackdropGroup,
+                marketModalPanel,
+                marketHeaderTitle,
+                marketSubtitle,
+                marketGoldBalanceText,
+                closeMarketBtn,
+                ofeMerchantCardRect,
+                ofeMerchantVisualHolder,
+                ofeMerchantTitle,
+                ofeMerchantDesc,
+                ofeMerchantOwned,
+                buyOfeBtn,
+                buyOfeBtnText,
+                shieldMerchantCardRect,
+                shieldMerchantVisualHolder,
+                shieldMerchantTitle,
+                shieldMerchantDesc,
+                shieldMerchantOwned,
+                buyShieldBtn,
+                buyShieldBtnText,
+                foilMat);
+
             SpoilsModalUI spoilsModal = spoilsRoot.gameObject.AddComponent<SpoilsModalUI>();
             spoilsModal.ConfigureReferences(
                 gameManager,
@@ -511,7 +741,9 @@ namespace Scoundrel.EditorTools
                 threatBadgeBg,
                 spoilsEchoSubtitle,
                 lootCardButtons,
-                foilMat);
+                foilMat,
+                visitMerchantBtn,
+                marketplaceModal);
 
             // =====================================================================
             // F. GAME OVER (VICTORY / DEFEAT) MODAL
@@ -565,6 +797,7 @@ namespace Scoundrel.EditorTools
             gameOverRoot.gameObject.SetActive(false);
             combatChoiceRect.gameObject.SetActive(false);
             spoilsRoot.gameObject.SetActive(false);
+            marketRoot.gameObject.SetActive(false);
 
             // =====================================================================
             // G. WIRE CONTROLLERS & SAVE SCENE
@@ -625,6 +858,20 @@ namespace Scoundrel.EditorTools
                 newRunStdBtn,
                 newRunNftBtn);
 
+            uiController.ConfigureMarketplaceAndConsumables(
+                marketplaceModal,
+                openMarketBtn,
+                ofeCardHolder,
+                ofeCyanAura,
+                ofeCountBadgeText,
+                useOfeBtn,
+                useOfeBtnText,
+                rustyShieldCardHolder,
+                rustyShieldAmberAura,
+                rustyShieldCountBadgeText,
+                useRustyShieldBtn,
+                useRustyShieldBtnText);
+
             // Enforce RobotoSlab-Regular SDF across EVERY TextMeshProUGUI in the scene
             int tmpCount = 0;
             foreach (TextMeshProUGUI tmp in canvasGo.GetComponentsInChildren<TextMeshProUGUI>(true))
@@ -642,6 +889,7 @@ namespace Scoundrel.EditorTools
             EditorUtility.SetDirty(gameManager);
             EditorUtility.SetDirty(fxController);
             EditorUtility.SetDirty(spoilsModal);
+            EditorUtility.SetDirty(marketplaceModal);
             EditorUtility.SetDirty(uiController);
             EditorSceneManager.MarkSceneDirty(scene);
             EditorSceneManager.SaveScene(scene, TargetScenePath);
@@ -1062,6 +1310,137 @@ namespace Scoundrel.EditorTools
             lootComp.TagText = tagText;
 
             return lootComp;
+        }
+
+        private static void BuildConsumableSubSlot(
+            string name,
+            Transform parent,
+            TMP_FontAsset font,
+            Sprite whiteSprite,
+            float offsetX,
+            string title,
+            Color auraColor,
+            Color badgeColor,
+            Color btnNormal,
+            Color btnHighlight,
+            string initialCount,
+            string initialBtnLabel,
+            out RectTransform cardHolder,
+            out Image auraImage,
+            out TextMeshProUGUI countBadgeText,
+            out Button useButton,
+            out TextMeshProUGUI useButtonText)
+        {
+            RectTransform slotRoot = CreateAnchoredRect(name, parent,
+                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(offsetX, -14f), new Vector2(108f, 304f));
+            Image slotBg = slotRoot.gameObject.AddComponent<Image>();
+            slotBg.sprite = whiteSprite;
+            slotBg.color = new Color(0.055f, 0.080f, 0.125f, 0.85f);
+            AddOutline(slotRoot.gameObject, new Color(auraColor.r, auraColor.g, auraColor.b, 0.45f), 1.5f);
+
+            TextMeshProUGUI subHeader = CreateTMP("SlotTitle", slotRoot, font, title, 12.5f, FontStyles.Bold,
+                TextAlignmentOptions.Center, new Color(0.92f, 0.94f, 0.98f, 0.92f));
+            subHeader.rectTransform.anchorMin = new Vector2(0f, 1f);
+            subHeader.rectTransform.anchorMax = new Vector2(1f, 1f);
+            subHeader.rectTransform.anchoredPosition = new Vector2(0f, -15f);
+            subHeader.rectTransform.sizeDelta = new Vector2(-6f, 20f);
+
+            RectTransform auraRect = CreateAnchoredRect("ConsumableAura", slotRoot,
+                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0f, 16f), new Vector2(96f, 134f));
+            auraImage = auraRect.gameObject.AddComponent<Image>();
+            auraImage.sprite = whiteSprite;
+            auraImage.color = auraColor;
+            auraImage.raycastTarget = false;
+
+            cardHolder = CreateAnchoredRect("CardHolder", slotRoot,
+                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(0f, 16f), new Vector2(86f, 120f));
+
+            RectTransform pill = CreateAnchoredRect("CountBadge", slotRoot,
+                new Vector2(1f, 0.5f), new Vector2(1f, 0.5f), new Vector2(-24f, -38f), new Vector2(42f, 26f));
+            Image pillBg = pill.gameObject.AddComponent<Image>();
+            pillBg.sprite = whiteSprite;
+            pillBg.color = badgeColor;
+            AddOutline(pill.gameObject, new Color(1f, 1f, 1f, 0.35f), 1f);
+
+            countBadgeText = CreateTMP("CountText", pill, font, initialCount, 14f, FontStyles.Bold, TextAlignmentOptions.Center, Color.white);
+            StretchFull(countBadgeText.rectTransform);
+
+            useButton = CreateStyledButton("UseButton", slotRoot, font, whiteSprite,
+                new Vector2(0.5f, 0f), new Vector2(0f, 26f), new Vector2(96f, 38f),
+                initialBtnLabel, 13.5f,
+                btnNormal,
+                btnHighlight,
+                new Color(0.16f, 0.18f, 0.24f, 0.82f),
+                out useButtonText);
+        }
+
+        private static void CreateMerchantItemCard(
+            string name,
+            Transform parent,
+            TMP_FontAsset font,
+            Sprite whiteSprite,
+            Vector2 anchoredPos,
+            string tagLabel,
+            string itemTitle,
+            string itemDescription,
+            string ownedInitial,
+            string buyBtnLabel,
+            Color accentColor,
+            Color btnNormal,
+            Color btnHighlight,
+            out RectTransform cardRectOut,
+            out RectTransform visualHolderOut,
+            out TextMeshProUGUI titleTextOut,
+            out TextMeshProUGUI descTextOut,
+            out TextMeshProUGUI ownedTextOut,
+            out Button buyButtonOut,
+            out TextMeshProUGUI buyButtonTextOut)
+        {
+            cardRectOut = CreateAnchoredRect(name, parent,
+                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), anchoredPos, new Vector2(490f, 468f));
+            Image cardBg = cardRectOut.gameObject.AddComponent<Image>();
+            cardBg.sprite = whiteSprite;
+            cardBg.color = new Color(0.105f, 0.145f, 0.220f, 0.99f);
+            AddOutline(cardRectOut.gameObject, new Color(accentColor.r, accentColor.g, accentColor.b, 0.82f), 2.5f);
+
+            TextMeshProUGUI tagTmp = CreateTMP("ItemTag", cardRectOut, font, tagLabel, 14f, FontStyles.Bold,
+                TextAlignmentOptions.Center, accentColor);
+            tagTmp.rectTransform.anchorMin = new Vector2(0f, 1f);
+            tagTmp.rectTransform.anchorMax = new Vector2(1f, 1f);
+            tagTmp.rectTransform.anchoredPosition = new Vector2(0f, -24f);
+            tagTmp.rectTransform.sizeDelta = new Vector2(-24f, 24f);
+
+            visualHolderOut = CreateAnchoredRect("CardVisualHolder", cardRectOut,
+                new Vector2(0.5f, 1f), new Vector2(0.5f, 1f), new Vector2(0f, -150f), new Vector2(148f, 206f));
+
+            titleTextOut = CreateTMP("ItemTitle", cardRectOut, font, itemTitle, 25f, FontStyles.Bold,
+                TextAlignmentOptions.Center, accentColor);
+            titleTextOut.rectTransform.anchorMin = new Vector2(0f, 0f);
+            titleTextOut.rectTransform.anchorMax = new Vector2(1f, 0f);
+            titleTextOut.rectTransform.anchoredPosition = new Vector2(0f, 184f);
+            titleTextOut.rectTransform.sizeDelta = new Vector2(-32f, 36f);
+
+            descTextOut = CreateTMP("ItemDescription", cardRectOut, font, itemDescription, 15.5f, FontStyles.Normal,
+                TextAlignmentOptions.Center, new Color(0.84f, 0.89f, 0.96f, 0.96f));
+            descTextOut.rectTransform.anchorMin = new Vector2(0f, 0f);
+            descTextOut.rectTransform.anchorMax = new Vector2(1f, 0f);
+            descTextOut.rectTransform.anchoredPosition = new Vector2(0f, 126f);
+            descTextOut.rectTransform.sizeDelta = new Vector2(-42f, 74f);
+
+            ownedTextOut = CreateTMP("ItemOwnedText", cardRectOut, font, ownedInitial, 16f, FontStyles.Bold,
+                TextAlignmentOptions.Center, new Color(0.98f, 0.88f, 0.52f, 0.95f));
+            ownedTextOut.rectTransform.anchorMin = new Vector2(0f, 0f);
+            ownedTextOut.rectTransform.anchorMax = new Vector2(1f, 0f);
+            ownedTextOut.rectTransform.anchoredPosition = new Vector2(0f, 78f);
+            ownedTextOut.rectTransform.sizeDelta = new Vector2(-32f, 28f);
+
+            buyButtonOut = CreateStyledButton("BuyItemButton", cardRectOut, font, whiteSprite,
+                new Vector2(0.5f, 0f), new Vector2(0f, 34f), new Vector2(260f, 48f),
+                buyBtnLabel, 18f,
+                btnNormal,
+                btnHighlight,
+                new Color(0.18f, 0.20f, 0.26f, 0.8f),
+                out buyButtonTextOut);
         }
     }
 }
