@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Security.Cryptography;
 using UnityEngine;
 using UnityEngine.Events;
 
@@ -10,6 +11,10 @@ namespace Scoundrel
     [Serializable] public class CardsDiscardedUnityEvent : UnityEvent<List<CardData>> { }
     [Serializable] public class PotionDrankUnityEvent : UnityEvent<float, bool> { }
     [Serializable] public class EpicPotionActivatedUnityEvent : UnityEvent<int> { }
+    [Serializable] public class MarketplaceItemBoughtUnityEvent : UnityEvent<int, int> { }
+    [Serializable] public class MarketplaceItemActivatedUnityEvent : UnityEvent<int, int> { }
+    [Serializable] public class OfeDodgeTriggeredUnityEvent : UnityEvent<CardData> { }
+    [Serializable] public class RustyShieldTriggeredUnityEvent : UnityEvent<CardData, float> { }
     [Serializable] public class RoomClearedUnityEvent : UnityEvent<int, SpoilsTier, float> { }
     [Serializable] public class GameOverUnityEvent : UnityEvent<bool, int> { }
 
@@ -37,6 +42,10 @@ namespace Scoundrel
         [SerializeField] private CardsDiscardedUnityEvent onCardsDiscarded = new CardsDiscardedUnityEvent();
         [SerializeField] private PotionDrankUnityEvent onPotionDrank = new PotionDrankUnityEvent();
         [SerializeField] private EpicPotionActivatedUnityEvent onEpicPotionActivated = new EpicPotionActivatedUnityEvent();
+        [SerializeField] private MarketplaceItemBoughtUnityEvent onMarketplaceItemBought = new MarketplaceItemBoughtUnityEvent();
+        [SerializeField] private MarketplaceItemActivatedUnityEvent onMarketplaceItemActivated = new MarketplaceItemActivatedUnityEvent();
+        [SerializeField] private OfeDodgeTriggeredUnityEvent onOfeDodgeTriggered = new OfeDodgeTriggeredUnityEvent();
+        [SerializeField] private RustyShieldTriggeredUnityEvent onRustyShieldTriggered = new RustyShieldTriggeredUnityEvent();
         [SerializeField] private RoomClearedUnityEvent onRoomCleared = new RoomClearedUnityEvent();
         [SerializeField] private GameOverUnityEvent onGameOver = new GameOverUnityEvent();
 
@@ -47,6 +56,10 @@ namespace Scoundrel
         public event Action<List<CardData>> OnCardsDiscarded;
         public event Action<float, bool> OnPotionDrank;
         public event Action<int> OnEpicPotionActivated;
+        public event Action<int, int> OnMarketplaceItemBought;
+        public event Action<int, int> OnMarketplaceItemActivated;
+        public event Action<CardData> OnOfeDodgeTriggered;
+        public event Action<CardData, float> OnRustyShieldTriggered;
         public event Action<int, SpoilsTier, float> OnRoomCleared;
         public event Action<bool, int> OnGameOver;
 
@@ -89,7 +102,22 @@ namespace Scoundrel
 
         public void StartNewRun(ulong? explicitSeed = null, bool? overrideLegendaryNft = null)
         {
-            ulong seed = explicitSeed ?? (ulong)DateTime.UtcNow.Ticks ^ (ulong)UnityEngine.Random.Range(1, int.MaxValue);
+            byte[] vrfSeed = new byte[32];
+            if (explicitSeed.HasValue)
+            {
+                ulong seedState = explicitSeed.Value == 0 ? 0xCAFEBABE12345678UL : explicitSeed.Value;
+                for (int chunk = 0; chunk < 4; chunk++)
+                {
+                    ulong part = SplitMix64(ref seedState);
+                    WriteUInt64LE(vrfSeed, chunk * 8, part);
+                }
+            }
+            else
+            {
+                RandomNumberGenerator.Fill(vrfSeed);
+            }
+
+            byte clientSeed = vrfSeed[0] == 0 ? (byte)42 : vrfSeed[0];
             bool hasLegendary = enableLegendaryWeapons && (overrideLegendaryNft ?? startWithLegendaryNft);
 
             State = new DungeonRunState
@@ -111,24 +139,17 @@ namespace Scoundrel
                 UnclaimedGold = 0,
                 Score = 0,
                 Status = RunStatus.Active,
+                VrfSeed = vrfSeed,
+                CombatRngNonce = 0,
+                OfeInventory = 0,
+                OfeBuffRoomsLeft = 0,
+                RustyShieldInventory = 0,
+                RustyShieldBuffRoomsLeft = 0,
                 CardsResolvedInRoom = 0,
                 DiscardCount = 0
             };
 
-            for (byte i = 0; i < ScoundrelCardDecoder.DeckSize; i++)
-            {
-                State.Deck[i] = i;
-            }
-
-            ulong rngState = seed;
-            for (int i = ScoundrelCardDecoder.DeckSize - 1; i >= 1; i--)
-            {
-                ulong randVal = SplitMix64(ref rngState);
-                int j = (int)(randVal % (ulong)(i + 1));
-                byte tmp = State.Deck[i];
-                State.Deck[i] = State.Deck[j];
-                State.Deck[j] = tmp;
-            }
+            ShuffleDeckFromVrf(State.Deck, State.VrfSeed);
 
             State.DeckHead = 0;
             State.DeckLen = ScoundrelCardDecoder.DeckSize;
@@ -139,7 +160,7 @@ namespace Scoundrel
 
             if (solanaBridge != null)
             {
-                solanaBridge.DispatchStartRun(seed, hasLegendary, ReconcileFromOnChainState);
+                solanaBridge.DispatchStartRun(clientSeed, ReconcileFromOnChainState);
                 State.SessionSignerPubkey = solanaBridge.ActiveSessionPubkey;
             }
 
@@ -224,6 +245,88 @@ namespace Scoundrel
             return true;
         }
 
+        public bool BuyItem(int itemId)
+        {
+            if (State.Status != RunStatus.Active) return false;
+
+            if (itemId == (int)MarketplaceItemId.OfeCharm)
+            {
+                if (!State.CanBuyOfe) return false;
+                State.UnclaimedGold -= DungeonRunState.OfeCostGold;
+                State.OfeInventory = (byte)Mathf.Min(255, State.OfeInventory + 1);
+
+                if (solanaBridge != null)
+                {
+                    solanaBridge.DispatchBuyItem((byte)MarketplaceItemId.OfeCharm);
+                }
+
+                NotifyStateChanged();
+                OnMarketplaceItemBought?.Invoke(itemId, State.OfeInventory);
+                onMarketplaceItemBought?.Invoke(itemId, State.OfeInventory);
+                return true;
+            }
+
+            if (itemId == (int)MarketplaceItemId.RustyShield)
+            {
+                if (!State.CanBuyRustyShield) return false;
+                State.UnclaimedGold -= DungeonRunState.RustyShieldCostGold;
+                State.RustyShieldInventory = (byte)Mathf.Min(255, State.RustyShieldInventory + 1);
+
+                if (solanaBridge != null)
+                {
+                    solanaBridge.DispatchBuyItem((byte)MarketplaceItemId.RustyShield);
+                }
+
+                NotifyStateChanged();
+                OnMarketplaceItemBought?.Invoke(itemId, State.RustyShieldInventory);
+                onMarketplaceItemBought?.Invoke(itemId, State.RustyShieldInventory);
+                return true;
+            }
+
+            return false;
+        }
+
+        public bool UseMarketplaceItem(int itemId)
+        {
+            if (State.Status != RunStatus.Active) return false;
+
+            if (itemId == (int)MarketplaceItemId.OfeCharm)
+            {
+                if (!State.CanUseOfe) return false;
+                State.OfeInventory -= 1;
+                State.OfeBuffRoomsLeft = 3;
+
+                if (solanaBridge != null)
+                {
+                    solanaBridge.DispatchUseMarketplaceItem((byte)MarketplaceItemId.OfeCharm);
+                }
+
+                NotifyStateChanged();
+                OnMarketplaceItemActivated?.Invoke(itemId, State.OfeBuffRoomsLeft);
+                onMarketplaceItemActivated?.Invoke(itemId, State.OfeBuffRoomsLeft);
+                return true;
+            }
+
+            if (itemId == (int)MarketplaceItemId.RustyShield)
+            {
+                if (!State.CanUseRustyShield) return false;
+                State.RustyShieldInventory -= 1;
+                State.RustyShieldBuffRoomsLeft = 3;
+
+                if (solanaBridge != null)
+                {
+                    solanaBridge.DispatchUseMarketplaceItem((byte)MarketplaceItemId.RustyShield);
+                }
+
+                NotifyStateChanged();
+                OnMarketplaceItemActivated?.Invoke(itemId, State.RustyShieldBuffRoomsLeft);
+                onMarketplaceItemActivated?.Invoke(itemId, State.RustyShieldBuffRoomsLeft);
+                return true;
+            }
+
+            return false;
+        }
+
         public bool TryResolveCard(int slotIndex, bool useWeapon)
         {
             if (State.Status != RunStatus.Active) return false;
@@ -269,6 +372,21 @@ namespace Scoundrel
 
                         State.RoomThreatAccumulator = (byte)Mathf.Min(255, State.RoomThreatAccumulator + monsterRank + bonusThreat);
                         State.WeaponCeiling = (byte)monsterRank;
+
+                        // Rusty Shield Check (50% VRF roll to block half of weapon chip damage)
+                        if (damageTenths > 0 && State.RustyShieldBuffRoomsLeft > 0)
+                        {
+                            ulong roll = NextVrfCombatRoll(State, 0UL);
+                            if ((roll % 2UL) == 0UL)
+                            {
+                                ushort blockedTenths = (ushort)(damageTenths - (damageTenths / 2));
+                                damageTenths = (ushort)(damageTenths / 2);
+                                float blockedHp = blockedTenths / 10f;
+                                OnRustyShieldTriggered?.Invoke(card, blockedHp);
+                                onRustyShieldTriggered?.Invoke(card, blockedHp);
+                            }
+                        }
+
                         State.HpTenths = (ushort)Mathf.Max(0, State.HpTenths - damageTenths);
                         State.StackedMonstersOnWeapon.Add(card);
 
@@ -284,6 +402,33 @@ namespace Scoundrel
                     {
                         damageTenths = (ushort)(monsterRank * 10);
                         State.RoomThreatAccumulator = (byte)Mathf.Min(255, State.RoomThreatAccumulator + monsterRank + 5);
+
+                        // 1. Ofe (Yoruba Vanishing Charm) Check: 50% VRF roll to dodge 100% of barehanded damage
+                        if (State.OfeBuffRoomsLeft > 0 && damageTenths > 0)
+                        {
+                            ulong roll = NextVrfCombatRoll(State, 0UL);
+                            if ((roll % 2UL) == 0UL)
+                            {
+                                damageTenths = 0;
+                                OnOfeDodgeTriggered?.Invoke(card);
+                                onOfeDodgeTriggered?.Invoke(card);
+                            }
+                        }
+
+                        // 2. Rusty Shield Check: if barehanded hit was not dodged, 50% VRF roll to block half damage
+                        if (damageTenths > 0 && State.RustyShieldBuffRoomsLeft > 0)
+                        {
+                            ulong roll = NextVrfCombatRoll(State, 0UL);
+                            if ((roll % 2UL) == 0UL)
+                            {
+                                ushort blockedTenths = (ushort)(damageTenths - (damageTenths / 2));
+                                damageTenths = (ushort)(damageTenths / 2);
+                                float blockedHp = blockedTenths / 10f;
+                                OnRustyShieldTriggered?.Invoke(card, blockedHp);
+                                onRustyShieldTriggered?.Invoke(card, blockedHp);
+                            }
+                        }
+
                         State.HpTenths = (ushort)Mathf.Max(0, State.HpTenths - damageTenths);
                         State.DiscardCount += 1;
 
@@ -385,6 +530,16 @@ namespace Scoundrel
                     State.HpTenths = (ushort)Mathf.Min(State.MaxHpTenths, State.HpTenths + echoTenths);
                     State.EpicPotionBuffRoomsLeft -= 1;
                     echoHealedFloat = (State.HpTenths - prevHp) / 10f;
+                }
+
+                // Decrement active Marketplace consumable buffs at the end of each completed room
+                if (State.OfeBuffRoomsLeft > 0)
+                {
+                    State.OfeBuffRoomsLeft -= 1;
+                }
+                if (State.RustyShieldBuffRoomsLeft > 0)
+                {
+                    State.RustyShieldBuffRoomsLeft -= 1;
                 }
 
                 if (State.DeckLen == 0 && allSlotsEmpty)
@@ -572,6 +727,68 @@ namespace Scoundrel
             return -remainingMonsterSum;
         }
 
+        /// <summary>
+        /// Exact 1:1 C# mirror of lib.rs::shuffle_deck_from_vrf.
+        /// Combines all 4 64-bit chunks of the 32-byte MagicBlock VRF seed and runs Fisher-Yates (43 down to 1).
+        /// </summary>
+        public static void ShuffleDeckFromVrf(byte[] deck, byte[] vrfSeed)
+        {
+            for (byte i = 0; i < ScoundrelCardDecoder.DeckSize; i++)
+            {
+                deck[i] = i;
+            }
+
+            ulong s0 = ReadUInt64LE(vrfSeed, 0);
+            ulong s1 = ReadUInt64LE(vrfSeed, 8);
+            ulong s2 = ReadUInt64LE(vrfSeed, 16);
+            ulong s3 = ReadUInt64LE(vrfSeed, 24);
+
+            ulong rngState = s0
+                ^ unchecked(s1 * 0x9E3779B97F4A7C15UL)
+                ^ unchecked(s2 * 0xBF58476D1CE4E5B9UL)
+                ^ s3;
+            if (rngState == 0UL)
+            {
+                rngState = 0xCAFEBABE12345678UL;
+            }
+
+            for (int i = ScoundrelCardDecoder.DeckSize - 1; i >= 1; i--)
+            {
+                ulong randVal = SplitMix64(ref rngState);
+                int j = (int)(randVal % (ulong)(i + 1));
+                byte tmp = deck[i];
+                deck[i] = deck[j];
+                deck[j] = tmp;
+            }
+        }
+
+        /// <summary>
+        /// Exact 1:1 C# mirror of lib.rs::next_vrf_combat_roll.
+        /// Derives a verifiable 64-bit roll from VrfSeed + incrementing CombatRngNonce + current state entropy.
+        /// </summary>
+        public static ulong NextVrfCombatRoll(DungeonRunState run, ulong slot)
+        {
+            byte[] seed = run.VrfSeed ?? new byte[32];
+            ulong s0 = ReadUInt64LE(seed, 0);
+            ulong s1 = ReadUInt64LE(seed, 8);
+            ulong s2 = ReadUInt64LE(seed, 16);
+            ulong s3 = ReadUInt64LE(seed, 24);
+
+            run.CombatRngNonce = unchecked(run.CombatRngNonce + 1UL);
+            ulong nonce = run.CombatRngNonce;
+
+            ulong mixed = s0
+                ^ RotateLeft(s1, 13)
+                ^ RotateLeft(s2, 29)
+                ^ RotateLeft(s3, 47)
+                ^ unchecked(nonce * 0x9E3779B97F4A7C15UL)
+                ^ unchecked(slot * 0xBF58476D1CE4E5B9UL)
+                ^ ((ulong)run.HpTenths << 16)
+                ^ ((ulong)run.DeckLen << 8);
+
+            return SplitMix64(ref mixed);
+        }
+
         public static ulong SplitMix64(ref ulong state)
         {
             state = unchecked(state + 0x9E3779B97F4A7C15UL);
@@ -579,6 +796,39 @@ namespace Scoundrel
             z = unchecked((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9UL);
             z = unchecked((z ^ (z >> 27)) * 0x94D049BB133111EBUL);
             return z ^ (z >> 31);
+        }
+
+        private static ulong RotateLeft(ulong value, int offset)
+        {
+            return (value << offset) | (value >> (64 - offset));
+        }
+
+        private static ulong ReadUInt64LE(byte[] buffer, int offset)
+        {
+            if (buffer == null || offset + 8 > buffer.Length) return 0UL;
+            ulong lo = (uint)(
+                buffer[offset + 0] |
+                (buffer[offset + 1] << 8) |
+                (buffer[offset + 2] << 16) |
+                (buffer[offset + 3] << 24));
+            ulong hi = (uint)(
+                buffer[offset + 4] |
+                (buffer[offset + 5] << 8) |
+                (buffer[offset + 6] << 16) |
+                (buffer[offset + 7] << 24));
+            return lo | (hi << 32);
+        }
+
+        private static void WriteUInt64LE(byte[] buffer, int offset, ulong value)
+        {
+            buffer[offset + 0] = (byte)(value & 0xFF);
+            buffer[offset + 1] = (byte)((value >> 8) & 0xFF);
+            buffer[offset + 2] = (byte)((value >> 16) & 0xFF);
+            buffer[offset + 3] = (byte)((value >> 24) & 0xFF);
+            buffer[offset + 4] = (byte)((value >> 32) & 0xFF);
+            buffer[offset + 5] = (byte)((value >> 40) & 0xFF);
+            buffer[offset + 6] = (byte)((value >> 48) & 0xFF);
+            buffer[offset + 7] = (byte)((value >> 56) & 0xFF);
         }
     }
 }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -18,6 +19,9 @@ namespace Scoundrel
     {
         // Exact 8-byte Anchor instruction & account discriminators from target/idl/scoundrel.json
         private static readonly byte[] DiscStartRun = { 72, 212, 1, 91, 61, 186, 2, 52 };
+        private static readonly byte[] DiscCallbackStartRun = { 191, 41, 73, 72, 165, 139, 12, 72 };
+        private static readonly byte[] DiscBuyItem = { 80, 82, 193, 201, 216, 27, 70, 184 };
+        private static readonly byte[] DiscUseMarketplaceItem = { 27, 247, 19, 150, 134, 232, 181, 186 };
         private static readonly byte[] DiscFleeRoom = { 67, 216, 47, 229, 176, 138, 203, 97 };
         private static readonly byte[] DiscUseEpicPotion = { 80, 220, 203, 172, 136, 53, 36, 231 };
         private static readonly byte[] DiscResolveCard = { 7, 249, 238, 138, 126, 35, 54, 92 };
@@ -26,11 +30,17 @@ namespace Scoundrel
         private static readonly byte[] DiscDungeonRunAccount = { 105, 118, 160, 69, 75, 241, 13, 36 };
 
         private static readonly byte[] DungeonRunSeedPrefix = Encoding.UTF8.GetBytes("dungeon_run");
+        private static readonly byte[] ProgramIdentitySeedPrefix = Encoding.UTF8.GetBytes("identity");
 
-        // 0.0025 SOL covers 0-byte system account rent-exemption (890,880 lamports) + ~320 turn signatures
-        private const ulong SessionFundingLamports = 2_500_000UL;
+        // MagicBlock VRF Program & Default Queue Constants (from ephemeral-vrf-sdk 0.17.3)
+        public const string DefaultVrfQueueAddress = "Cuj97ggrhhidhbu39TijNVqE74xvKJ69gDervRUXAxGh";
+        public const string VrfProgramAddress = "Vrf1RNUjXmQGjmQrQLvJHs9SNkvDJEsRVFPkfSQUwGz";
+        public const string SlotHashesSysvarAddress = "SysvarS1otHashes111111111111111111111111111";
+
         private const int ConfirmationMaxAttempts = 60;
         private const int ConfirmationPollDelayMs = 250;
+        private const int VrfFulfillmentPollAttempts = 8;
+        private const int VrfFulfillmentPollDelayMs = 500;
 
         [Header("Solana Network & Mode")]
         [SerializeField] private bool offlineSimulationMode = true;
@@ -46,7 +56,7 @@ namespace Scoundrel
         public string ActiveSessionPubkey { get; private set; } = string.Empty;
         public string ActivePlayerPubkey { get; private set; } = string.Empty;
         public string DungeonRunPdaAddress { get; private set; } = string.Empty;
-        public string LastStatusMessage { get; private set; } = "Session Key Ready (Local Optimistic)";
+        public string LastStatusMessage { get; private set; } = "Session Key Ready (Local VRF Sim)";
         public string LastTransactionSignature { get; private set; } = string.Empty;
         public int SettledTransactionCount { get; private set; }
 
@@ -99,9 +109,25 @@ namespace Scoundrel
 
         #region Fire-and-Forget Dispatchers (Called by ScoundrelGameManager)
 
+        public void DispatchStartRun(byte clientSeed, Action<DungeonRunState> onChainStateFetched = null)
+        {
+            ObserveAsync(StartRunAsync(clientSeed, onChainStateFetched), "start_run");
+        }
+
         public void DispatchStartRun(ulong seed, bool hasLegendaryNft, Action<DungeonRunState> onChainStateFetched = null)
         {
-            ObserveAsync(StartRunAsync(seed, hasLegendaryNft, onChainStateFetched), "start_run");
+            byte clientSeed = (byte)((seed & 0xFFUL) == 0 ? 42 : (seed & 0xFFUL));
+            ObserveAsync(StartRunAsync(clientSeed, onChainStateFetched), "start_run");
+        }
+
+        public void DispatchBuyItem(byte itemId)
+        {
+            ObserveAsync(BuyItemAsync(itemId), "buy_item");
+        }
+
+        public void DispatchUseMarketplaceItem(byte itemId)
+        {
+            ObserveAsync(UseMarketplaceItemAsync(itemId), "use_marketplace_item");
         }
 
         public void DispatchFleeRoom()
@@ -133,7 +159,7 @@ namespace Scoundrel
 
         #region Async Solana Instruction Methods
 
-        public async Task<bool> StartRunAsync(ulong seed, bool hasLegendaryNft, Action<DungeonRunState> onChainStateFetched = null)
+        public async Task<bool> StartRunAsync(byte clientSeed, Action<DungeonRunState> onChainStateFetched = null)
         {
             int currentEpoch = ++_runEpoch;
 
@@ -164,7 +190,7 @@ namespace Scoundrel
             {
                 _hasActiveOnChainSession = false;
                 SettledTransactionCount++;
-                EmitStatus("Session Key Active • Local Sim (start_run)");
+                EmitStatus("MagicBlock VRF Seeded • Local Sim (start_run)");
                 return true;
             }
 
@@ -191,7 +217,7 @@ namespace Scoundrel
                     return true;
                 }
 
-                EmitStatus("Authorizing Ephemeral Session Key (start_run)...");
+                EmitStatus("Requesting MagicBlock VRF & Session Key (start_run)...");
 
                 var blockhashRes = await rpc.GetLatestBlockHashAsync(Commitment.Confirmed);
                 string recentBlockhash = blockhashRes?.Result?.Value?.Blockhash;
@@ -204,29 +230,34 @@ namespace Scoundrel
                     return true;
                 }
 
-                var instructions = new List<TransactionInstruction>(3);
+                var instructions = new List<TransactionInstruction>(2);
 
-                // If a previous dungeon_run PDA already exists for this player, close it first to reclaim rent & re-init cleanly
+                // If a previous dungeon_run PDA already exists and is still Active or AwaitingVrf,
+                // close it first so start_run's init_if_needed can re-initialize cleanly.
                 var existingAcctRes = await rpc.GetAccountInfoAsync(derivedPda.Key, Commitment.Confirmed, BinaryEncoding.Base64);
                 AccountInfo existingInfo = existingAcctRes?.Result?.Value;
                 if (existingInfo != null && existingInfo.Lamports > 0 && existingInfo.Owner == programPubKey.Key)
                 {
-                    instructions.Add(BuildCloseRunInstruction(connectedPlayer.PublicKey, derivedPda, programPubKey));
+                    DungeonRunState existingState = null;
+                    if (existingInfo.Data != null && existingInfo.Data.Count > 0 && !string.IsNullOrEmpty(existingInfo.Data[0]))
+                    {
+                        existingState = DeserializeDungeonRun(Convert.FromBase64String(existingInfo.Data[0]));
+                    }
+
+                    if (existingState == null || existingState.Status == RunStatus.Active || existingState.Status == RunStatus.AwaitingVrf)
+                    {
+                        instructions.Add(BuildCloseRunInstruction(connectedPlayer.PublicKey, derivedPda, programPubKey));
+                    }
                 }
 
-                // Fund the fresh ephemeral session key so all subsequent room actions require zero wallet popups
-                instructions.Add(SystemProgram.Transfer(
-                    connectedPlayer.PublicKey,
-                    turnSessionSigner.PublicKey,
-                    SessionFundingLamports));
-
+                // start_run automatically transfers 0.005 SOL (5,000,000 lamports) from player to session_signer
+                // and invokes MagicBlock VRF request_randomness CPI
                 instructions.Add(BuildStartRunInstruction(
                     connectedPlayer.PublicKey,
                     turnSessionSigner.PublicKey,
                     derivedPda,
                     programPubKey,
-                    seed,
-                    hasLegendaryNft));
+                    clientSeed));
 
                 var tx = new Transaction
                 {
@@ -256,10 +287,60 @@ namespace Scoundrel
                 LastTransactionSignature = signature;
                 _hasActiveOnChainSession = true;
                 SettledTransactionCount++;
-                EmitStatus($"Session Key Active • On-Chain ({ShortKey(turnSessionSigner.PublicKey.Key)})");
+                EmitStatus("Awaiting MagicBlock VRF Oracle...");
 
-                // Fetch confirmed DungeonRun PDA account and reconcile slot-salted deck & initial 4-card room
-                DungeonRunState onChainState = await FetchAndDeserializeDungeonRunAsync(rpc, derivedPda, ct);
+                // Poll for MagicBlock VRF oracle callback (run_status transitioning from 3 -> 0) for up to ~4s
+                DungeonRunState onChainState = null;
+                for (int poll = 0; poll < VrfFulfillmentPollAttempts; poll++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    onChainState = await FetchAndDeserializeDungeonRunAsync(rpc, derivedPda, ct);
+                    if (onChainState != null && onChainState.Status != RunStatus.AwaitingVrf)
+                    {
+                        break;
+                    }
+                    await Task.Delay(VrfFulfillmentPollDelayMs, ct);
+                }
+
+                // Fallback: if VRF Oracle has not fulfilled within 4s (e.g. localnet or unserviced queue),
+                // fulfill callback_start_run directly using the funded session_signer and 32 cryptographic bytes.
+                if (onChainState == null || onChainState.Status == RunStatus.AwaitingVrf)
+                {
+                    EmitStatus("Fulfilling VRF Callback (Fallback Oracle)...");
+                    byte[] fallbackRandomness = new byte[32];
+                    RandomNumberGenerator.Fill(fallbackRandomness);
+
+                    var cbBlockhashRes = await rpc.GetLatestBlockHashAsync(Commitment.Confirmed);
+                    string cbBlockhash = cbBlockhashRes?.Result?.Value?.Blockhash;
+                    if (!string.IsNullOrEmpty(cbBlockhash))
+                    {
+                        TransactionInstruction cbIx = BuildCallbackStartRunInstruction(
+                            turnSessionSigner.PublicKey,
+                            derivedPda,
+                            programPubKey,
+                            fallbackRandomness);
+
+                        var cbTx = new Transaction
+                        {
+                            RecentBlockHash = cbBlockhash,
+                            FeePayer = turnSessionSigner.PublicKey,
+                            Instructions = new List<TransactionInstruction>(1) { cbIx },
+                            Signatures = new List<SignaturePubKeyPair>()
+                        };
+                        cbTx.Sign(turnSessionSigner);
+
+                        string cbSig = await SendAndConfirmTransactionAsync(rpc, cbTx, ct);
+                        if (!string.IsNullOrEmpty(cbSig))
+                        {
+                            LastTransactionSignature = cbSig;
+                            SettledTransactionCount++;
+                            onChainState = await FetchAndDeserializeDungeonRunAsync(rpc, derivedPda, ct);
+                        }
+                    }
+                }
+
+                EmitStatus($"MagicBlock VRF Active • Session ({ShortKey(turnSessionSigner.PublicKey.Key)})");
+
                 if (onChainState != null && currentEpoch == _runEpoch && this != null)
                 {
                     onChainStateFetched?.Invoke(onChainState);
@@ -282,6 +363,22 @@ namespace Scoundrel
             {
                 _txMutex.Release();
             }
+        }
+
+        public Task<bool> BuyItemAsync(byte itemId)
+        {
+            string itemLabel = itemId == 0 ? "buy_item (Ofe Charm)" : "buy_item (Rusty Shield)";
+            return ExecuteSessionGameplayInstructionAsync(
+                itemLabel,
+                (signer, pda, prog) => BuildBuyItemInstruction(signer, pda, prog, itemId));
+        }
+
+        public Task<bool> UseMarketplaceItemAsync(byte itemId)
+        {
+            string itemLabel = itemId == 0 ? "use_item (Ofe Charm)" : "use_item (Rusty Shield)";
+            return ExecuteSessionGameplayInstructionAsync(
+                itemLabel,
+                (signer, pda, prog) => BuildUseMarketplaceItemInstruction(signer, pda, prog, itemId));
         }
 
         public Task<bool> FleeRoomAsync()
@@ -428,28 +525,123 @@ namespace Scoundrel
                 out bump);
         }
 
+        public static bool TryDeriveProgramIdentityPda(
+            PublicKey programPubKey,
+            out PublicKey programIdentityPda,
+            out byte bump)
+        {
+            if (programPubKey == null)
+            {
+                programIdentityPda = null;
+                bump = 0;
+                return false;
+            }
+
+            return PublicKey.TryFindProgramAddress(
+                new[] { ProgramIdentitySeedPrefix },
+                programPubKey,
+                out programIdentityPda,
+                out bump);
+        }
+
         public static TransactionInstruction BuildStartRunInstruction(
             PublicKey player,
             PublicKey sessionSigner,
             PublicKey dungeonRunPda,
             PublicKey programPubKey,
-            ulong seed,
-            bool hasLegendaryNft)
+            byte clientSeed)
         {
-            byte[] data = new byte[17];
+            byte[] data = new byte[9];
             Buffer.BlockCopy(DiscStartRun, 0, data, 0, 8);
-            WriteUInt64LE(data, 8, seed);
-            data[16] = hasLegendaryNft ? (byte)1 : (byte)0;
+            data[8] = clientSeed;
+
+            PublicKey oracleQueue = new PublicKey(DefaultVrfQueueAddress);
+            PublicKey vrfProgram = new PublicKey(VrfProgramAddress);
+            PublicKey slotHashes = new PublicKey(SlotHashesSysvarAddress);
+            TryDeriveProgramIdentityPda(programPubKey, out PublicKey programIdentity, out _);
 
             return new TransactionInstruction
             {
                 ProgramId = programPubKey.KeyBytes,
-                Keys = new List<AccountMeta>(4)
+                Keys = new List<AccountMeta>(8)
                 {
                     AccountMeta.Writable(player, true),
-                    AccountMeta.ReadOnly(sessionSigner, false),
+                    AccountMeta.Writable(sessionSigner, false),
                     AccountMeta.Writable(dungeonRunPda, false),
+                    AccountMeta.Writable(oracleQueue, false),
+                    AccountMeta.ReadOnly(vrfProgram, false),
+                    AccountMeta.ReadOnly(programIdentity, false),
+                    AccountMeta.ReadOnly(slotHashes, false),
                     AccountMeta.ReadOnly(SystemProgram.ProgramIdKey, false)
+                },
+                Data = data
+            };
+        }
+
+        public static TransactionInstruction BuildCallbackStartRunInstruction(
+            PublicKey vrfIdentityOrFallbackSigner,
+            PublicKey dungeonRunPda,
+            PublicKey programPubKey,
+            byte[] randomness32)
+        {
+            byte[] data = new byte[40];
+            Buffer.BlockCopy(DiscCallbackStartRun, 0, data, 0, 8);
+            if (randomness32 != null && randomness32.Length >= 32)
+            {
+                Buffer.BlockCopy(randomness32, 0, data, 8, 32);
+            }
+
+            return new TransactionInstruction
+            {
+                ProgramId = programPubKey.KeyBytes,
+                Keys = new List<AccountMeta>(2)
+                {
+                    AccountMeta.ReadOnly(vrfIdentityOrFallbackSigner, true),
+                    AccountMeta.Writable(dungeonRunPda, false)
+                },
+                Data = data
+            };
+        }
+
+        public static TransactionInstruction BuildBuyItemInstruction(
+            PublicKey signer,
+            PublicKey dungeonRunPda,
+            PublicKey programPubKey,
+            byte itemId)
+        {
+            byte[] data = new byte[9];
+            Buffer.BlockCopy(DiscBuyItem, 0, data, 0, 8);
+            data[8] = itemId;
+
+            return new TransactionInstruction
+            {
+                ProgramId = programPubKey.KeyBytes,
+                Keys = new List<AccountMeta>(2)
+                {
+                    AccountMeta.Writable(signer, true),
+                    AccountMeta.Writable(dungeonRunPda, false)
+                },
+                Data = data
+            };
+        }
+
+        public static TransactionInstruction BuildUseMarketplaceItemInstruction(
+            PublicKey signer,
+            PublicKey dungeonRunPda,
+            PublicKey programPubKey,
+            byte itemId)
+        {
+            byte[] data = new byte[9];
+            Buffer.BlockCopy(DiscUseMarketplaceItem, 0, data, 0, 8);
+            data[8] = itemId;
+
+            return new TransactionInstruction
+            {
+                ProgramId = programPubKey.KeyBytes,
+                Keys = new List<AccountMeta>(2)
+                {
+                    AccountMeta.Writable(signer, true),
+                    AccountMeta.Writable(dungeonRunPda, false)
                 },
                 Data = data
             };
@@ -563,13 +755,14 @@ namespace Scoundrel
 
         /// <summary>
         /// Deserializes an Anchor Borsh-encoded DungeonRun account buffer into Unity's DungeonRunState.
-        /// Verifies the 8-byte DungeonRun discriminator and parses variable-width Option&lt;u8&gt;[4] room slots.
+        /// Verifies the 8-byte DungeonRun discriminator and parses variable-width Option&lt;u8&gt;[4] room slots,
+        /// MagicBlock VRF seed + nonce, and Mini Marketplace inventories/buffs.
         /// </summary>
         public static DungeonRunState DeserializeDungeonRun(byte[] data)
         {
             // Minimum possible Borsh byte length (when all 4 room Option<u8> slots are None = 4 bytes):
-            // 8 (disc) + 32 (player) + 32 (session) + 44 (deck) + 2 (head/len) + 4 (room min) + 28 (remaining scalar fields) = 150 bytes
-            if (data == null || data.Length < 150)
+            // 8 (disc) + 32 (player) + 32 (session) + 1 (bump) + 44 (deck) + 2 (head/len) + 4 (room min) + 71 (scalar tail) = 194 bytes
+            if (data == null || data.Length < 194)
             {
                 Debug.LogWarning($"[SolanaScoundrelBridge] DungeonRun buffer too short ({data?.Length ?? 0} bytes).");
                 return null;
@@ -594,12 +787,16 @@ namespace Scoundrel
             Buffer.BlockCopy(data, offset, sessionBytes, 0, 32);
             offset += 32;
 
+            // Consume bump byte right after session_signer
+            _ = data[offset++];
+
             var state = new DungeonRunState
             {
                 PlayerPubkey = new PublicKey(playerBytes).Key,
                 SessionSignerPubkey = new PublicKey(sessionBytes).Key,
                 Deck = new byte[ScoundrelCardDecoder.DeckSize],
-                Room = new int[4] { -1, -1, -1, -1 }
+                Room = new int[4] { -1, -1, -1, -1 },
+                VrfSeed = new byte[32]
             };
 
             Buffer.BlockCopy(data, offset, state.Deck, 0, ScoundrelCardDecoder.DeckSize);
@@ -637,10 +834,10 @@ namespace Scoundrel
                 }
             }
 
-            // Remaining fixed-width tail is 28 bytes (through bump)
-            if (offset + 28 > data.Length)
+            // Remaining fixed-width scalar tail is 71 bytes
+            if (offset + 71 > data.Length)
             {
-                Debug.LogWarning("[SolanaScoundrelBridge] DungeonRun buffer truncated before scalar tail.");
+                Debug.LogWarning("[SolanaScoundrelBridge] DungeonRun buffer truncated before VRF/Marketplace scalar tail.");
                 return null;
             }
 
@@ -665,10 +862,16 @@ namespace Scoundrel
             state.Score = ReadInt32LE(data, ref offset);
 
             byte rawStatus = data[offset++];
-            state.Status = rawStatus <= (byte)RunStatus.Defeat ? (RunStatus)rawStatus : RunStatus.Active;
+            state.Status = rawStatus <= (byte)RunStatus.AwaitingVrf ? (RunStatus)rawStatus : RunStatus.Active;
 
-            // Consume trailing bump byte
-            _ = data[offset++];
+            Buffer.BlockCopy(data, offset, state.VrfSeed, 0, 32);
+            offset += 32;
+
+            state.CombatRngNonce = ReadUInt64LE(data, ref offset);
+            state.OfeInventory = data[offset++];
+            state.OfeBuffRoomsLeft = data[offset++];
+            state.RustyShieldInventory = data[offset++];
+            state.RustyShieldBuffRoomsLeft = data[offset++];
 
             int activeInRoom = state.ActiveCardsInRoomCount();
             int equippedCount = state.EquippedWeaponRank > 0 ? 1 : 0;
@@ -976,18 +1179,6 @@ namespace Scoundrel
             return $"{base58.Substring(0, 4)}..{base58.Substring(base58.Length - 4)}";
         }
 
-        private static void WriteUInt64LE(byte[] buffer, int offset, ulong value)
-        {
-            buffer[offset + 0] = (byte)(value & 0xFF);
-            buffer[offset + 1] = (byte)((value >> 8) & 0xFF);
-            buffer[offset + 2] = (byte)((value >> 16) & 0xFF);
-            buffer[offset + 3] = (byte)((value >> 24) & 0xFF);
-            buffer[offset + 4] = (byte)((value >> 32) & 0xFF);
-            buffer[offset + 5] = (byte)((value >> 40) & 0xFF);
-            buffer[offset + 6] = (byte)((value >> 48) & 0xFF);
-            buffer[offset + 7] = (byte)((value >> 56) & 0xFF);
-        }
-
         private static ushort ReadUInt16LE(byte[] buffer, ref int offset)
         {
             ushort val = (ushort)(buffer[offset] | (buffer[offset + 1] << 8));
@@ -1009,6 +1200,13 @@ namespace Scoundrel
         private static int ReadInt32LE(byte[] buffer, ref int offset)
         {
             return unchecked((int)ReadUInt32LE(buffer, ref offset));
+        }
+
+        private static ulong ReadUInt64LE(byte[] buffer, ref int offset)
+        {
+            ulong lo = ReadUInt32LE(buffer, ref offset);
+            ulong hi = ReadUInt32LE(buffer, ref offset);
+            return lo | (hi << 32);
         }
 
         #endregion

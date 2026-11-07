@@ -21,6 +21,8 @@ namespace Scoundrel
         private static readonly Color WastedPotionTextColor = new Color(0.72f, 0.75f, 0.80f, 0.95f);
         private static readonly Color EchoHealTextColor = new Color(0.42f, 1.00f, 0.80f, 1f);
         private static readonly Color EpicAuraGoldColor = new Color(1.00f, 0.84f, 0.24f, 0.88f);
+        private static readonly Color OfeVanishCyanColor = new Color(0.32f, 0.96f, 1.00f, 1f);
+        private static readonly Color RustyShieldAmberColor = new Color(1.00f, 0.78f, 0.28f, 1f);
 
         private static Sprite _proceduralRingSprite;
         private static Texture2D _proceduralRingTexture;
@@ -355,6 +357,12 @@ namespace Scoundrel
 
         private void PlayBarehandedHitFX(Vector3 targetPos, float damageTaken)
         {
+            // If Ofe Vanishing Charm dodged 100% of barehanded damage, suppress heavy damage SFX & red HP loss text
+            if (damageTaken <= 0.001f)
+            {
+                return;
+            }
+
             // Barehanded hit: ONLY heavy player damage sound + stronger shake + crimson HP text
             PlayOneShotSfx(ScoundrelAssetPaths.SfxPlayerTakeDamage, 1.0f, 0.95f);
             TriggerTabletopShake(0.34f, new Vector2(24f, 20f), 24);
@@ -390,6 +398,53 @@ namespace Scoundrel
             SpawnAuraPulse(targetPos, EpicAuraGoldColor, 260f, 0.46f);
             SpawnAuraPulse(targetPos, new Color(0.45f, 0.96f, 1.0f, 0.72f), 190f, 0.34f);
             SpawnFloatingText($"EPIC ELIXIR ({buffRoomsLeft} ROOMS)", LegendaryCleaveTextColor, targetPos, 34f);
+        }
+
+        private void HandleMarketplaceItemActivated(int itemId, int buffRoomsLeft)
+        {
+            Vector3 targetPos = ResolveActionWorldPosition();
+            PlayOneShotStinger(ScoundrelAssetPaths.SfxEpicPotionUse, 0.90f);
+
+            if (itemId == (int)MarketplaceItemId.OfeCharm)
+            {
+                SpawnAuraPulse(targetPos, OfeVanishCyanColor, 255f, 0.44f);
+                SpawnAuraPulse(targetPos, new Color(0.68f, 0.42f, 1.00f, 0.76f), 185f, 0.32f);
+                SpawnFloatingText($"OFE CHARM ({buffRoomsLeft} ROOMS)", OfeVanishCyanColor, targetPos, 34f);
+            }
+            else if (itemId == (int)MarketplaceItemId.RustyShield)
+            {
+                SpawnAuraPulse(targetPos, RustyShieldAmberColor, 250f, 0.44f);
+                SpawnAuraPulse(targetPos, new Color(0.82f, 0.88f, 0.96f, 0.76f), 185f, 0.32f);
+                SpawnFloatingText($"RUSTY SHIELD ({buffRoomsLeft} ROOMS)", RustyShieldAmberColor, targetPos, 34f);
+            }
+        }
+
+        private void HandleOfeDodgeTriggered(CardData monster)
+        {
+            Vector3 targetPos = ResolveActionWorldPosition();
+
+            // Phase-shift whoosh + cyan aura + horizontal phase jitter
+            PlayOneShotSfx(ScoundrelAssetPaths.SfxCardDiscard, 0.94f, 1.14f);
+            SpawnAuraPulse(targetPos, OfeVanishCyanColor, 230f, 0.38f);
+
+            if (_tabletopShakeRoot != null)
+            {
+                _tabletopShakeRoot.DOComplete(false);
+                _tabletopShakeRoot.DOShakeAnchorPos(0.24f, new Vector2(26f, 4f), 28, 0f, false, true);
+            }
+
+            SpawnFloatingText("OFE! VANISHED (0 DMG)!", OfeVanishCyanColor, targetPos, 38f);
+        }
+
+        private void HandleRustyShieldTriggered(CardData monster, float damageBlocked)
+        {
+            Vector3 targetPos = ResolveActionWorldPosition();
+
+            PlayOneShotSfx(ScoundrelAssetPaths.SfxWeaponParryClink, 0.92f, 0.94f);
+            SpawnDeflectSparkVfx(targetPos);
+            SpawnAuraPulse(targetPos, RustyShieldAmberColor, 200f, 0.34f);
+
+            SpawnFloatingText("RUSTY SHIELD (-50% DMG)!", RustyShieldAmberColor, targetPos, 36f);
         }
 
         private void HandleRoomCleared(int threat, SpoilsTier tier, float echoHealed)
@@ -634,6 +689,9 @@ namespace Scoundrel
             _subscribedManager.OnMonsterSlain += HandleMonsterSlain;
             _subscribedManager.OnPotionDrank += HandlePotionDrank;
             _subscribedManager.OnEpicPotionActivated += HandleEpicPotionActivated;
+            _subscribedManager.OnMarketplaceItemActivated += HandleMarketplaceItemActivated;
+            _subscribedManager.OnOfeDodgeTriggered += HandleOfeDodgeTriggered;
+            _subscribedManager.OnRustyShieldTriggered += HandleRustyShieldTriggered;
             _subscribedManager.OnRoomCleared += HandleRoomCleared;
         }
 
@@ -644,6 +702,9 @@ namespace Scoundrel
             _subscribedManager.OnMonsterSlain -= HandleMonsterSlain;
             _subscribedManager.OnPotionDrank -= HandlePotionDrank;
             _subscribedManager.OnEpicPotionActivated -= HandleEpicPotionActivated;
+            _subscribedManager.OnMarketplaceItemActivated -= HandleMarketplaceItemActivated;
+            _subscribedManager.OnOfeDodgeTriggered -= HandleOfeDodgeTriggered;
+            _subscribedManager.OnRustyShieldTriggered -= HandleRustyShieldTriggered;
             _subscribedManager.OnRoomCleared -= HandleRoomCleared;
             _subscribedManager = null;
         }

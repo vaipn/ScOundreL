@@ -45,7 +45,14 @@ namespace Scoundrel
     {
         Active = 0,
         Victory = 1,
-        Defeat = 2
+        Defeat = 2,
+        AwaitingVrf = 3
+    }
+
+    public enum MarketplaceItemId : byte
+    {
+        OfeCharm = 0,
+        RustyShield = 1
     }
 
     [Serializable]
@@ -174,6 +181,8 @@ namespace Scoundrel
         public const string GoldCoinSingle = "Sprites/LootAndSkins/gold_coin_single";
         public const string GoldCoinStack = "Sprites/LootAndSkins/gold_coin_stack";
         public const string CardEpicPotion = "Sprites/LootAndSkins/card_epic_potion";
+        public const string ItemOfeCharm = "Sprites/LootAndSkins/item_ofe_charm";
+        public const string ItemRustyShield = "Sprites/LootAndSkins/item_rusty_shield";
         public const string SkinWeaponLegendary = "Sprites/LootAndSkins/skin_weapon_legendary";
 
         public const string VfxSlashStandard = "Sprites/VFX/vfx_slash_standard";
@@ -251,6 +260,18 @@ namespace Scoundrel
             return sprite;
         }
 
+        public static Sprite LoadOfeCharmSprite()
+        {
+            Sprite s = LoadSprite(ScoundrelAssetPaths.ItemOfeCharm);
+            return s != null ? s : LoadSprite(ScoundrelAssetPaths.CardEpicPotion);
+        }
+
+        public static Sprite LoadRustyShieldSprite()
+        {
+            Sprite s = LoadSprite(ScoundrelAssetPaths.ItemRustyShield);
+            return s != null ? s : LoadSprite(ScoundrelAssetPaths.UiShieldBadge);
+        }
+
         public static AudioClip LoadAudio(string resourcePath)
         {
             if (string.IsNullOrEmpty(resourcePath)) return null;
@@ -306,9 +327,21 @@ namespace Scoundrel
         public byte RoomThreatAccumulator;
         public byte PendingSpoilsThreat;
 
+        public const uint PriceOfeCharm = 60;
+        public const uint PriceRustyShield = 45;
+        public const uint OfeCostGold = PriceOfeCharm;
+        public const uint RustyShieldCostGold = PriceRustyShield;
+
         public uint UnclaimedGold;
         public int Score;
         public RunStatus Status = RunStatus.Active;
+
+        public byte[] VrfSeed = new byte[32];
+        public ulong CombatRngNonce;
+        public byte OfeInventory;
+        public byte OfeBuffRoomsLeft;
+        public byte RustyShieldInventory;
+        public byte RustyShieldBuffRoomsLeft;
 
         // Local UI tracking for cascade stacking and discard pile count
         public List<CardData> StackedMonstersOnWeapon = new List<CardData>();
@@ -366,6 +399,24 @@ namespace Scoundrel
             Status == RunStatus.Active &&
             EpicPotionsInventory > 0 &&
             EpicPotionBuffRoomsLeft == 0;
+
+        public bool CanBuyOfe =>
+            Status == RunStatus.Active &&
+            UnclaimedGold >= PriceOfeCharm;
+
+        public bool CanBuyRustyShield =>
+            Status == RunStatus.Active &&
+            UnclaimedGold >= PriceRustyShield;
+
+        public bool CanUseOfe =>
+            Status == RunStatus.Active &&
+            OfeInventory > 0 &&
+            OfeBuffRoomsLeft == 0;
+
+        public bool CanUseRustyShield =>
+            Status == RunStatus.Active &&
+            RustyShieldInventory > 0 &&
+            RustyShieldBuffRoomsLeft == 0;
 
         public bool CanUseWeaponAgainst(int monsterRank)
         {
