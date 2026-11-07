@@ -962,4 +962,95 @@ describe("scoundrel", () => {
     expect(state.ofeBuffRoomsLeft).to.equal(1);
     expect(state.rustyShieldBuffRoomsLeft).to.equal(0);
   });
+
+  it("7. Mints accumulated unclaimed_gold into real SPL Gold tokens in the player's Associated Token Account", async () => {
+    const SPL_TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+    const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+
+    const targetK = findTargetRngState((d) => {
+      if (d[0].category !== "monster" || d[1].category !== "monster") return false;
+      const sum1 = d[0].rank + d[1].rank;
+      if (sum1 < 15 || sum1 > 17) return false;
+      return d[2].category === "potion" && d[2].rank >= 8;
+    });
+
+    const { player, sessionSigner, dungeonRun } = await startDeterministicRun(targetK);
+
+    // Clear Room 1 and claim High Threat Spoils (+85 Gold)
+    await program.methods
+      .resolveCard(0, false)
+      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
+      .signers([sessionSigner])
+      .rpc();
+    await program.methods
+      .resolveCard(1, false)
+      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
+      .signers([sessionSigner])
+      .rpc();
+    await program.methods
+      .resolveCard(2, false)
+      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
+      .signers([sessionSigner])
+      .rpc();
+    await program.methods
+      .claimSpoils(0)
+      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
+      .signers([sessionSigner])
+      .rpc();
+
+    let state = await program.account.dungeonRun.fetch(dungeonRun);
+    expect(state.unclaimedGold).to.equal(85);
+
+    const [goldMint] = PublicKey.findProgramAddressSync(
+      [Buffer.from("scoundrel_gold_mint")],
+      program.programId
+    );
+    const [playerGoldAta] = PublicKey.findProgramAddressSync(
+      [player.publicKey.toBuffer(), SPL_TOKEN_PROGRAM_ID.toBuffer(), goldMint.toBuffer()],
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
+
+    await program.methods
+      .claimGoldTokens()
+      .accountsPartial({
+        payer: player.publicKey,
+        player: player.publicKey,
+        dungeonRun,
+        goldMint,
+        playerGoldAta,
+        tokenProgram: SPL_TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+      })
+      .signers([player])
+      .rpc();
+
+    state = await program.account.dungeonRun.fetch(dungeonRun);
+    expect(state.unclaimedGold).to.equal(0);
+
+    const tokenBalance = await provider.connection.getTokenAccountBalance(playerGoldAta);
+    expect(tokenBalance.value.amount).to.equal("85");
+    expect(tokenBalance.value.decimals).to.equal(0);
+
+    // Calling claimGoldTokens again with 0 unclaimed_gold must fail with NoGoldToClaim
+    let duplicateClaimFailed = false;
+    try {
+      await program.methods
+        .claimGoldTokens()
+        .accountsPartial({
+          payer: player.publicKey,
+          player: player.publicKey,
+          dungeonRun,
+          goldMint,
+          playerGoldAta,
+          tokenProgram: SPL_TOKEN_PROGRAM_ID,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        })
+        .signers([player])
+        .rpc();
+    } catch (err: any) {
+      duplicateClaimFailed = true;
+      expect(String(err)).to.include("NoGoldToClaim");
+    }
+    expect(duplicateClaimFailed).to.be.true;
+  });
 });

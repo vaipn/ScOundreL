@@ -96,6 +96,107 @@
       ]
     },
     {
+      "name": "claim_gold_tokens",
+      "discriminator": [
+        168,
+        50,
+        230,
+        68,
+        223,
+        73,
+        86,
+        21
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "player"
+        },
+        {
+          "name": "dungeon_run",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  117,
+                  110,
+                  103,
+                  101,
+                  111,
+                  110,
+                  95,
+                  114,
+                  117,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "dungeon_run.player",
+                "account": "DungeonRun"
+              }
+            ]
+          }
+        },
+        {
+          "name": "gold_mint",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  99,
+                  111,
+                  117,
+                  110,
+                  100,
+                  114,
+                  101,
+                  108,
+                  95,
+                  103,
+                  111,
+                  108,
+                  100,
+                  95,
+                  109,
+                  105,
+                  110,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "player_gold_ata",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "claim_spoils",
       "discriminator": [
         132,
@@ -520,6 +621,19 @@
   ],
   "events": [
     {
+      "name": "GoldTokensMinted",
+      "discriminator": [
+        79,
+        191,
+        96,
+        188,
+        195,
+        252,
+        49,
+        103
+      ]
+    },
+    {
       "name": "LegendarySkinUnlocked",
       "discriminator": [
         121,
@@ -669,6 +783,26 @@
       "code": 6021,
       "name": "InvalidSpoilsChoice",
       "msg": "Invalid spoils choice for the current threat tier."
+    },
+    {
+      "code": 6022,
+      "name": "NoGoldToClaim",
+      "msg": "No unclaimed gold available to mint."
+    },
+    {
+      "code": 6023,
+      "name": "InvalidPlayerGoldAta",
+      "msg": "Provided player token account does not match canonical Associated Token Address."
+    },
+    {
+      "code": 6024,
+      "name": "InvalidTokenProgram",
+      "msg": "Invalid SPL Token program address."
+    },
+    {
+      "code": 6025,
+      "name": "InvalidAssociatedTokenProgram",
+      "msg": "Invalid SPL Associated Token Account program address."
     }
   ],
   "types": [
@@ -813,6 +947,30 @@
           {
             "name": "rusty_shield_buff_rooms_left",
             "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "GoldTokensMinted",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "player",
+            "type": "pubkey"
+          },
+          {
+            "name": "mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "token_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
           }
         ]
       }

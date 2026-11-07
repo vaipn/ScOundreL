@@ -1,9 +1,18 @@
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
+use anchor_lang::solana_program::program::{invoke, invoke_signed};
 use ephemeral_vrf_sdk::anchor::vrf;
 use ephemeral_vrf_sdk::instructions::{create_request_randomness_ix, RequestRandomnessParams};
 use ephemeral_vrf_sdk::types::SerializableAccountMeta;
 
 declare_id!("7r9dGYN2WiNKgr7wD89Heh4rrWX1zkGhxs8ckjKfbNQx");
+
+pub const SPL_TOKEN_PROGRAM_ID: Pubkey = pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+pub const ASSOCIATED_TOKEN_PROGRAM_ID: Pubkey =
+    pubkey!("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+pub const GOLD_MINT_SEED: &[u8] = b"scoundrel_gold_mint";
+pub const SPL_MINT_LEN: usize = 82;
+pub const SPL_GOLD_DECIMALS: u8 = 0;
 
 pub const DECK_SIZE: usize = 44;
 pub const ROOM_SIZE: usize = 4;
@@ -591,6 +600,129 @@ pub mod scoundrel {
         Ok(())
     }
 
+    pub fn claim_gold_tokens(ctx: Context<ClaimGoldTokens>) -> Result<()> {
+        let amount = ctx.accounts.dungeon_run.unclaimed_gold as u64;
+        require!(amount > 0, ScoundrelError::NoGoldToClaim);
+
+        let (expected_ata, _) = Pubkey::find_program_address(
+            &[
+                ctx.accounts.player.key().as_ref(),
+                SPL_TOKEN_PROGRAM_ID.as_ref(),
+                ctx.accounts.gold_mint.key().as_ref(),
+            ],
+            &ASSOCIATED_TOKEN_PROGRAM_ID,
+        );
+        require_keys_eq!(
+            ctx.accounts.player_gold_ata.key(),
+            expected_ata,
+            ScoundrelError::InvalidPlayerGoldAta
+        );
+
+        let mint_bump = ctx.bumps.gold_mint;
+        let mint_seeds: &[&[u8]] = &[GOLD_MINT_SEED, &[mint_bump]];
+
+        if ctx.accounts.gold_mint.data_is_empty() {
+            let rent_lamports = Rent::get()?.minimum_balance(SPL_MINT_LEN);
+            anchor_lang::system_program::create_account(
+                CpiContext::new_with_signer(
+                    ctx.accounts.system_program.key(),
+                    anchor_lang::system_program::CreateAccount {
+                        from: ctx.accounts.payer.to_account_info(),
+                        to: ctx.accounts.gold_mint.to_account_info(),
+                    },
+                    &[mint_seeds],
+                ),
+                rent_lamports,
+                SPL_MINT_LEN as u64,
+                &SPL_TOKEN_PROGRAM_ID,
+            )?;
+
+            // SPL Token InitializeMint2 (tag = 20, decimals = 0, mint_authority = gold_mint, freeze_authority = None)
+            let mut init_mint_data = Vec::with_capacity(35);
+            init_mint_data.push(20u8);
+            init_mint_data.push(SPL_GOLD_DECIMALS);
+            init_mint_data.extend_from_slice(ctx.accounts.gold_mint.key().as_ref());
+            init_mint_data.push(0u8);
+
+            let init_mint_ix = Instruction {
+                program_id: SPL_TOKEN_PROGRAM_ID,
+                accounts: vec![AccountMeta::new(ctx.accounts.gold_mint.key(), false)],
+                data: init_mint_data,
+            };
+            invoke(
+                &init_mint_ix,
+                &[ctx.accounts.gold_mint.to_account_info()],
+            )?;
+        } else {
+            require_keys_eq!(
+                *ctx.accounts.gold_mint.owner,
+                SPL_TOKEN_PROGRAM_ID,
+                ScoundrelError::InvalidTokenProgram
+            );
+        }
+
+        if ctx.accounts.player_gold_ata.data_is_empty() {
+            // Associated Token Account CreateIdempotent (discriminator = 1u8)
+            let create_ata_ix = Instruction {
+                program_id: ASSOCIATED_TOKEN_PROGRAM_ID,
+                accounts: vec![
+                    AccountMeta::new(ctx.accounts.payer.key(), true),
+                    AccountMeta::new(ctx.accounts.player_gold_ata.key(), false),
+                    AccountMeta::new_readonly(ctx.accounts.player.key(), false),
+                    AccountMeta::new_readonly(ctx.accounts.gold_mint.key(), false),
+                    AccountMeta::new_readonly(ctx.accounts.system_program.key(), false),
+                    AccountMeta::new_readonly(SPL_TOKEN_PROGRAM_ID, false),
+                ],
+                data: vec![1u8],
+            };
+            invoke(
+                &create_ata_ix,
+                &[
+                    ctx.accounts.payer.to_account_info(),
+                    ctx.accounts.player_gold_ata.to_account_info(),
+                    ctx.accounts.player.to_account_info(),
+                    ctx.accounts.gold_mint.to_account_info(),
+                    ctx.accounts.system_program.to_account_info(),
+                    ctx.accounts.token_program.to_account_info(),
+                ],
+            )?;
+        }
+
+        // Checks-Effects-Interactions: clear unclaimed_gold before MintTo CPI
+        ctx.accounts.dungeon_run.unclaimed_gold = 0;
+
+        let mut mint_to_data = Vec::with_capacity(9);
+        mint_to_data.push(7u8);
+        mint_to_data.extend_from_slice(&amount.to_le_bytes());
+
+        let mint_to_ix = Instruction {
+            program_id: SPL_TOKEN_PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(ctx.accounts.gold_mint.key(), false),
+                AccountMeta::new(ctx.accounts.player_gold_ata.key(), false),
+                AccountMeta::new_readonly(ctx.accounts.gold_mint.key(), true),
+            ],
+            data: mint_to_data,
+        };
+        invoke_signed(
+            &mint_to_ix,
+            &[
+                ctx.accounts.gold_mint.to_account_info(),
+                ctx.accounts.player_gold_ata.to_account_info(),
+            ],
+            &[mint_seeds],
+        )?;
+
+        emit!(GoldTokensMinted {
+            player: ctx.accounts.player.key(),
+            mint: ctx.accounts.gold_mint.key(),
+            token_account: ctx.accounts.player_gold_ata.key(),
+            amount,
+        });
+
+        Ok(())
+    }
+
     pub fn close_run(_ctx: Context<CloseRun>) -> Result<()> {
         Ok(())
     }
@@ -657,6 +789,50 @@ pub struct PlayerTurn<'info> {
         constraint = signer.key() == dungeon_run.player || signer.key() == dungeon_run.session_signer @ ScoundrelError::UnauthorizedSigner
     )]
     pub dungeon_run: Account<'info, DungeonRun>,
+}
+
+#[derive(Accounts)]
+pub struct ClaimGoldTokens<'info> {
+    #[account(
+        mut,
+        constraint = payer.key() == dungeon_run.player || payer.key() == dungeon_run.session_signer @ ScoundrelError::UnauthorizedSigner
+    )]
+    pub payer: Signer<'info>,
+
+    /// CHECK: Verified against `dungeon_run.player`.
+    #[account(
+        constraint = player.key() == dungeon_run.player @ ScoundrelError::UnauthorizedSigner
+    )]
+    pub player: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"dungeon_run", dungeon_run.player.as_ref()],
+        bump = dungeon_run.bump
+    )]
+    pub dungeon_run: Account<'info, DungeonRun>,
+
+    /// CHECK: Canonical SPL Gold Mint PDA (`seeds = [b"scoundrel_gold_mint"]`), initialized on first claim and used as its own mint authority.
+    #[account(
+        mut,
+        seeds = [GOLD_MINT_SEED],
+        bump
+    )]
+    pub gold_mint: UncheckedAccount<'info>,
+
+    /// CHECK: Player's Associated Token Account for `gold_mint`, verified by PDA derivation and created idempotently if empty.
+    #[account(mut)]
+    pub player_gold_ata: UncheckedAccount<'info>,
+
+    /// CHECK: SPL Token program (`TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`)
+    #[account(address = SPL_TOKEN_PROGRAM_ID @ ScoundrelError::InvalidTokenProgram)]
+    pub token_program: UncheckedAccount<'info>,
+
+    /// CHECK: SPL Associated Token Account program (`ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL`)
+    #[account(address = ASSOCIATED_TOKEN_PROGRAM_ID @ ScoundrelError::InvalidAssociatedTokenProgram)]
+    pub associated_token_program: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
@@ -730,6 +906,14 @@ pub struct RustyShieldBlocked {
     pub nonce: u64,
 }
 
+#[event]
+pub struct GoldTokensMinted {
+    pub player: Pubkey,
+    pub mint: Pubkey,
+    pub token_account: Pubkey,
+    pub amount: u64,
+}
+
 #[error_code]
 pub enum ScoundrelError {
     #[msg("Invalid card ID outside 0..=43 range.")]
@@ -776,4 +960,12 @@ pub enum ScoundrelError {
     NoSpoilsToClaim,
     #[msg("Invalid spoils choice for the current threat tier.")]
     InvalidSpoilsChoice,
+    #[msg("No unclaimed gold available to mint.")]
+    NoGoldToClaim,
+    #[msg("Provided player token account does not match canonical Associated Token Address.")]
+    InvalidPlayerGoldAta,
+    #[msg("Invalid SPL Token program address.")]
+    InvalidTokenProgram,
+    #[msg("Invalid SPL Associated Token Account program address.")]
+    InvalidAssociatedTokenProgram,
 }

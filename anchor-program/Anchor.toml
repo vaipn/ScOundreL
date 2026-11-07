@@ -8,6 +8,9 @@ skip-lint = false
 [programs.localnet]
 scoundrel = "7r9dGYN2WiNKgr7wD89Heh4rrWX1zkGhxs8ckjKfbNQx"
 
+[programs.devnet]
+scoundrel = "7r9dGYN2WiNKgr7wD89Heh4rrWX1zkGhxs8ckjKfbNQx"
+
 [provider]
 cluster = "localnet"
 wallet = "~/.config/solana/id.json"
