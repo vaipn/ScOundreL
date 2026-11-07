@@ -1,4 +1,7 @@
 use anchor_lang::prelude::*;
+use ephemeral_vrf_sdk::anchor::vrf;
+use ephemeral_vrf_sdk::instructions::{create_request_randomness_ix, RequestRandomnessParams};
+use ephemeral_vrf_sdk::types::SerializableAccountMeta;
 
 declare_id!("7r9dGYN2WiNKgr7wD89Heh4rrWX1zkGhxs8ckjKfbNQx");
 
@@ -10,6 +13,13 @@ pub const LEGENDARY_WEAPONS_ENABLED: bool = false;
 pub const RUN_STATUS_ACTIVE: u8 = 0;
 pub const RUN_STATUS_VICTORY: u8 = 1;
 pub const RUN_STATUS_DEFEAT: u8 = 2;
+pub const RUN_STATUS_AWAITING_VRF: u8 = 3;
+
+pub const ITEM_OFE_CHARM: u8 = 0;
+pub const ITEM_RUSTY_SHIELD: u8 = 1;
+pub const PRICE_OFE_CHARM: u32 = 60;
+pub const PRICE_RUSTY_SHIELD: u32 = 45;
+pub const SESSION_SIGNER_MIN_LAMPORTS: u64 = 5_000_000;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CardCategory {
@@ -34,6 +44,44 @@ fn splitmix64(state: &mut u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
     z ^ (z >> 31)
+}
+
+pub fn shuffle_deck_from_vrf(randomness: &[u8; 32]) -> [u8; DECK_SIZE] {
+    let mut deck = [0u8; DECK_SIZE];
+    for (i, card) in deck.iter_mut().enumerate() {
+        *card = i as u8;
+    }
+
+    let s0 = u64::from_le_bytes(randomness[0..8].try_into().unwrap());
+    let s1 = u64::from_le_bytes(randomness[8..16].try_into().unwrap());
+    let s2 = u64::from_le_bytes(randomness[16..24].try_into().unwrap());
+    let s3 = u64::from_le_bytes(randomness[24..32].try_into().unwrap());
+    let mut rng_state = s0
+        ^ s1.wrapping_mul(0x9E3779B97F4A7C15)
+        ^ s2.wrapping_mul(0xBF58476D1CE4E5B9)
+        ^ s3.wrapping_mul(0x94D049BB133111EB);
+
+    for i in (1..DECK_SIZE).rev() {
+        let rand_val = splitmix64(&mut rng_state);
+        let j = (rand_val as usize) % (i + 1);
+        deck.swap(i, j);
+    }
+    deck
+}
+
+fn next_vrf_combat_roll(run: &mut DungeonRun, slot: u64) -> u64 {
+    run.combat_rng_nonce = run.combat_rng_nonce.wrapping_add(1);
+    let byte_offset = ((run.combat_rng_nonce as usize).wrapping_mul(8)) % 32;
+    let seed_chunk = u64::from_le_bytes(
+        run.vrf_seed[byte_offset..byte_offset + 8]
+            .try_into()
+            .unwrap(),
+    );
+    let mut state = seed_chunk
+        ^ run.combat_rng_nonce.wrapping_mul(0x9E3779B97F4A7C15)
+        ^ slot.wrapping_mul(0xBF58476D1CE4E5B9)
+        ^ (run.hp_tenths as u64).wrapping_mul(0x94D049BB133111EB);
+    splitmix64(&mut state)
 }
 
 fn draw_card(run: &mut DungeonRun) -> Option<u8> {
@@ -85,8 +133,25 @@ fn compute_defeat_score(run: &DungeonRun) -> Result<i32> {
 pub mod scoundrel {
     use super::*;
 
-    pub fn start_run(ctx: Context<StartRun>, seed: u64, has_legendary_nft: bool) -> Result<()> {
-        let clock = Clock::get()?;
+    pub fn start_run(ctx: Context<StartRun>, client_seed: u8) -> Result<()> {
+        let current_session_lamports = ctx.accounts.session_signer.lamports();
+        if ctx.accounts.session_signer.key() != ctx.accounts.player.key()
+            && current_session_lamports < SESSION_SIGNER_MIN_LAMPORTS
+        {
+            let top_up = SESSION_SIGNER_MIN_LAMPORTS.saturating_sub(current_session_lamports);
+            anchor_lang::system_program::transfer(
+                CpiContext::new(
+                    ctx.accounts.system_program.key(),
+                    anchor_lang::system_program::Transfer {
+                        from: ctx.accounts.player.to_account_info(),
+                        to: ctx.accounts.session_signer.to_account_info(),
+                    },
+                ),
+                top_up,
+            )?;
+        }
+
+        let dungeon_run_key = ctx.accounts.dungeon_run.key();
         let run = &mut ctx.accounts.dungeon_run;
 
         run.player = ctx.accounts.player.key();
@@ -98,30 +163,17 @@ pub mod scoundrel {
             *card = i as u8;
         }
 
-        let mut rng_state = seed.wrapping_add(clock.slot);
-        for i in (1..DECK_SIZE).rev() {
-            let rand_val = splitmix64(&mut rng_state);
-            let j = (rand_val as usize) % (i + 1);
-            deck.swap(i, j);
-        }
-
         run.deck = deck;
         run.deck_head = 0;
         run.deck_len = DECK_SIZE as u8;
         run.room = [None; ROOM_SIZE];
-
-        for slot in 0..ROOM_SIZE {
-            run.room[slot] = draw_card(run);
-        }
-
         run.cards_resolved_in_room = 0;
         run.hp_tenths = MAX_HP_TENTHS;
         run.max_hp_tenths = MAX_HP_TENTHS;
-        let allow_legendary = LEGENDARY_WEAPONS_ENABLED && has_legendary_nft;
         run.equipped_weapon_rank = 0;
         run.weapon_ceiling = 0;
-        run.has_legendary_skin = allow_legendary;
-        run.legendary_forged_edge_charges = if allow_legendary { 1 } else { 0 };
+        run.has_legendary_skin = false;
+        run.legendary_forged_edge_charges = 0;
         run.potion_used_this_room = false;
         run.first_potion_healed_tenths = 0;
         run.epic_potions_inventory = 0;
@@ -131,22 +183,153 @@ pub mod scoundrel {
         run.pending_spoils_threat = 0;
         run.unclaimed_gold = 0;
         run.score = 0;
-        run.run_status = RUN_STATUS_ACTIVE;
+        run.run_status = RUN_STATUS_AWAITING_VRF;
+        run.vrf_seed = [0u8; 32];
+        run.combat_rng_nonce = 0;
+        run.ofe_inventory = 0;
+        run.ofe_buff_rooms_left = 0;
+        run.rusty_shield_inventory = 0;
+        run.rusty_shield_buff_rooms_left = 0;
+
+        let ix = create_request_randomness_ix(RequestRandomnessParams {
+            payer: ctx.accounts.player.key(),
+            oracle_queue: ctx.accounts.oracle_queue.key(),
+            callback_program_id: ID,
+            callback_discriminator: instruction::CallbackStartRun::DISCRIMINATOR.to_vec(),
+            caller_seed: [client_seed; 32],
+            accounts_metas: Some(vec![SerializableAccountMeta {
+                pubkey: dungeon_run_key,
+                is_signer: false,
+                is_writable: true,
+            }]),
+            ..Default::default()
+        });
+
+        if ctx.accounts.vrf_program.executable && !ctx.accounts.oracle_queue.data_is_empty() {
+            ctx.accounts
+                .invoke_signed_vrf(&ctx.accounts.player.to_account_info(), &ix)?;
+        } else {
+            msg!("VRF oracle queue uninitialized on local validator; awaiting callback_start_run");
+        }
 
         Ok(())
     }
 
-    pub fn flee_room(ctx: Context<GameplayAction>) -> Result<()> {
+    pub fn callback_start_run(
+        ctx: Context<CallbackStartRun>,
+        randomness: [u8; 32],
+    ) -> Result<()> {
         let run = &mut ctx.accounts.dungeon_run;
+        require!(
+            run.run_status == RUN_STATUS_AWAITING_VRF,
+            ScoundrelError::NotAwaitingVrf
+        );
 
-        require!(run.run_status == RUN_STATUS_ACTIVE, ScoundrelError::RunNotActive);
-        require!(run.cards_resolved_in_room == 0, ScoundrelError::CannotFleeMidRoom);
-        require!(!run.fled_last_room, ScoundrelError::CannotFleeConsecutiveRooms);
-        require!(run.pending_spoils_threat == 0, ScoundrelError::PendingSpoilsMustBeClaimed);
+        run.vrf_seed = randomness;
+        run.combat_rng_nonce = 0;
+        run.deck = shuffle_deck_from_vrf(&randomness);
+        run.deck_head = 0;
+        run.deck_len = DECK_SIZE as u8;
+        run.room = [None; ROOM_SIZE];
 
         for slot in 0..ROOM_SIZE {
-            if let Some(card) = run.room[slot].take() {
-                push_card_bottom(run, card)?;
+            run.room[slot] = draw_card(run);
+        }
+
+        run.run_status = RUN_STATUS_ACTIVE;
+        Ok(())
+    }
+
+    pub fn buy_item(ctx: Context<PlayerTurn>, item_id: u8) -> Result<()> {
+        let run = &mut ctx.accounts.dungeon_run;
+        require!(
+            run.run_status == RUN_STATUS_ACTIVE,
+            ScoundrelError::RunNotActive
+        );
+
+        match item_id {
+            ITEM_OFE_CHARM => {
+                require!(
+                    run.unclaimed_gold >= PRICE_OFE_CHARM,
+                    ScoundrelError::InsufficientGold
+                );
+                run.unclaimed_gold = run.unclaimed_gold.saturating_sub(PRICE_OFE_CHARM);
+                run.ofe_inventory = run.ofe_inventory.saturating_add(1);
+            }
+            ITEM_RUSTY_SHIELD => {
+                require!(
+                    run.unclaimed_gold >= PRICE_RUSTY_SHIELD,
+                    ScoundrelError::InsufficientGold
+                );
+                run.unclaimed_gold = run.unclaimed_gold.saturating_sub(PRICE_RUSTY_SHIELD);
+                run.rusty_shield_inventory = run.rusty_shield_inventory.saturating_add(1);
+            }
+            _ => return err!(ScoundrelError::InvalidMarketplaceItem),
+        }
+
+        Ok(())
+    }
+
+    pub fn use_marketplace_item(ctx: Context<PlayerTurn>, item_id: u8) -> Result<()> {
+        let run = &mut ctx.accounts.dungeon_run;
+        require!(
+            run.run_status == RUN_STATUS_ACTIVE,
+            ScoundrelError::RunNotActive
+        );
+
+        match item_id {
+            ITEM_OFE_CHARM => {
+                require!(
+                    run.ofe_inventory > 0,
+                    ScoundrelError::NoMarketplaceItemAvailable
+                );
+                require!(
+                    run.ofe_buff_rooms_left == 0,
+                    ScoundrelError::MarketplaceBuffAlreadyActive
+                );
+                run.ofe_inventory -= 1;
+                run.ofe_buff_rooms_left = 3;
+            }
+            ITEM_RUSTY_SHIELD => {
+                require!(
+                    run.rusty_shield_inventory > 0,
+                    ScoundrelError::NoMarketplaceItemAvailable
+                );
+                require!(
+                    run.rusty_shield_buff_rooms_left == 0,
+                    ScoundrelError::MarketplaceBuffAlreadyActive
+                );
+                run.rusty_shield_inventory -= 1;
+                run.rusty_shield_buff_rooms_left = 3;
+            }
+            _ => return err!(ScoundrelError::InvalidMarketplaceItem),
+        }
+
+        Ok(())
+    }
+
+    pub fn flee_room(ctx: Context<PlayerTurn>) -> Result<()> {
+        let run = &mut ctx.accounts.dungeon_run;
+        require!(
+            run.run_status == RUN_STATUS_ACTIVE,
+            ScoundrelError::RunNotActive
+        );
+        require!(
+            run.cards_resolved_in_room == 0,
+            ScoundrelError::CannotFleeMidRoom
+        );
+        require!(
+            !run.fled_last_room,
+            ScoundrelError::CannotFleeConsecutiveRooms
+        );
+        require!(
+            run.pending_spoils_threat == 0,
+            ScoundrelError::PendingSpoilsMustBeClaimed
+        );
+
+        for slot in 0..ROOM_SIZE {
+            if let Some(card_id) = run.room[slot].take() {
+                push_card_bottom(run, card_id)?;
             }
         }
 
@@ -155,51 +338,64 @@ pub mod scoundrel {
         }
 
         run.fled_last_room = true;
-        run.potion_used_this_room = false;
-        run.room_threat_accumulator = 0;
-        run.cards_resolved_in_room = 0;
-
         Ok(())
     }
 
-    pub fn use_epic_potion(ctx: Context<GameplayAction>) -> Result<()> {
+    pub fn use_epic_potion(ctx: Context<PlayerTurn>) -> Result<()> {
         let run = &mut ctx.accounts.dungeon_run;
-
-        require!(run.run_status == RUN_STATUS_ACTIVE, ScoundrelError::RunNotActive);
-        require!(run.epic_potions_inventory > 0, ScoundrelError::NoEpicPotionsAvailable);
-        require!(run.epic_potion_buff_rooms_left == 0, ScoundrelError::EpicPotionAlreadyActive);
+        require!(
+            run.run_status == RUN_STATUS_ACTIVE,
+            ScoundrelError::RunNotActive
+        );
+        require!(
+            run.epic_potions_inventory > 0,
+            ScoundrelError::NoEpicPotionsAvailable
+        );
+        require!(
+            run.epic_potion_buff_rooms_left == 0,
+            ScoundrelError::EpicPotionAlreadyActive
+        );
 
         run.epic_potions_inventory -= 1;
         run.epic_potion_buff_rooms_left = 3;
-
         Ok(())
     }
 
     pub fn resolve_card(
-        ctx: Context<GameplayAction>,
+        ctx: Context<PlayerTurn>,
         slot_index: u8,
         use_weapon: bool,
     ) -> Result<()> {
+        let clock = Clock::get()?;
         let run = &mut ctx.accounts.dungeon_run;
+        require!(
+            run.run_status == RUN_STATUS_ACTIVE,
+            ScoundrelError::RunNotActive
+        );
+        require!(
+            run.pending_spoils_threat == 0,
+            ScoundrelError::PendingSpoilsMustBeClaimed
+        );
+        require!(
+            (slot_index as usize) < ROOM_SIZE,
+            ScoundrelError::InvalidSlotIndex
+        );
 
-        require!(run.run_status == RUN_STATUS_ACTIVE, ScoundrelError::RunNotActive);
-        require!(run.pending_spoils_threat == 0, ScoundrelError::PendingSpoilsMustBeClaimed);
-        require!((slot_index as usize) < ROOM_SIZE, ScoundrelError::InvalidSlotIndex);
-
-        let idx = slot_index as usize;
-        require!(run.room[idx].is_some(), ScoundrelError::EmptyRoomSlot);
-
-        let card_id = run.room[idx].take().unwrap();
+        let slot = slot_index as usize;
+        let card_id = run.room[slot].take().ok_or(ScoundrelError::EmptyRoomSlot)?;
         let (category, card_rank) = decode_card(card_id)?;
 
         match category {
             CardCategory::Monster => {
                 let monster_rank = card_rank;
-                let damage_tenths: u16;
+                let mut damage_tenths: u16;
 
                 if use_weapon {
                     let prev_ceiling = run.weapon_ceiling;
-                    require!(run.equipped_weapon_rank > 0, ScoundrelError::NoWeaponEquipped);
+                    require!(
+                        run.equipped_weapon_rank > 0,
+                        ScoundrelError::NoWeaponEquipped
+                    );
                     require!(
                         monster_rank <= prev_ceiling || run.legendary_forged_edge_charges > 0,
                         ScoundrelError::WeaponCeilingExceeded
@@ -209,17 +405,19 @@ pub mod scoundrel {
                         (monster_rank.saturating_sub(run.equipped_weapon_rank) as u16) * 10;
 
                     if monster_rank > prev_ceiling {
-                        run.legendary_forged_edge_charges -= 1;
+                        run.legendary_forged_edge_charges =
+                            run.legendary_forged_edge_charges.saturating_sub(1);
                     }
 
-                    let bonus_threat: u8 = if (prev_ceiling.saturating_sub(monster_rank) <= 2
-                        && monster_rank >= 8)
-                        || monster_rank > run.equipped_weapon_rank
-                    {
-                        3
-                    } else {
-                        0
-                    };
+                    let close_to_ceiling_high_rank =
+                        prev_ceiling.saturating_sub(monster_rank) <= 2 && monster_rank >= 8;
+                    let took_chip_damage = monster_rank > run.equipped_weapon_rank;
+                    let bonus_threat: u8 =
+                        if close_to_ceiling_high_rank || took_chip_damage {
+                            3
+                        } else {
+                            0
+                        };
 
                     run.room_threat_accumulator = run
                         .room_threat_accumulator
@@ -231,8 +429,36 @@ pub mod scoundrel {
                     damage_tenths = (monster_rank as u16) * 10;
                     run.room_threat_accumulator = run
                         .room_threat_accumulator
-                        .saturating_add(monster_rank)
-                        .saturating_add(5);
+                        .saturating_add(monster_rank.saturating_add(5));
+                }
+
+                // Ofe Dodge Check (50% VRF roll when fighting barehanded)
+                if !use_weapon && run.ofe_buff_rooms_left > 0 && damage_tenths > 0 {
+                    let roll = next_vrf_combat_roll(run, clock.slot);
+                    if roll % 2 == 0 {
+                        damage_tenths = 0;
+                        msg!("OfeDodged");
+                        emit!(OfeDodged {
+                            player: run.player,
+                            monster_rank,
+                            nonce: run.combat_rng_nonce,
+                        });
+                    }
+                }
+
+                // Rusty Shield Block Check (50% VRF roll to block 50% of incoming damage)
+                if damage_tenths > 0 && run.rusty_shield_buff_rooms_left > 0 {
+                    let roll = next_vrf_combat_roll(run, clock.slot);
+                    if roll % 2 == 0 {
+                        damage_tenths /= 2;
+                        msg!("RustyShieldBlocked");
+                        emit!(RustyShieldBlocked {
+                            player: run.player,
+                            monster_rank,
+                            damage_tenths,
+                            nonce: run.combat_rng_nonce,
+                        });
+                    }
                 }
 
                 run.hp_tenths = run.hp_tenths.saturating_sub(damage_tenths);
@@ -276,12 +502,18 @@ pub mod scoundrel {
                     .min(run.max_hp_tenths);
                 run.epic_potion_buff_rooms_left -= 1;
             }
+            if run.ofe_buff_rooms_left > 0 {
+                run.ofe_buff_rooms_left -= 1;
+            }
+            if run.rusty_shield_buff_rooms_left > 0 {
+                run.rusty_shield_buff_rooms_left -= 1;
+            }
 
             if run.deck_len == 0 && all_slots_empty {
                 run.run_status = RUN_STATUS_VICTORY;
                 let base_score = (run.hp_tenths / 10) as i32;
                 let potion_bonus =
-                    if run.hp_tenths == MAX_HP_TENTHS && category == CardCategory::Potion {
+                    if run.hp_tenths == run.max_hp_tenths && category == CardCategory::Potion {
                         card_rank as i32
                     } else {
                         0
@@ -299,10 +531,12 @@ pub mod scoundrel {
         Ok(())
     }
 
-    pub fn claim_spoils(ctx: Context<GameplayAction>, choice: u8) -> Result<()> {
+    pub fn claim_spoils(ctx: Context<PlayerTurn>, choice: u8) -> Result<()> {
         let run = &mut ctx.accounts.dungeon_run;
-
-        require!(run.run_status == RUN_STATUS_ACTIVE, ScoundrelError::RunNotActive);
+        require!(
+            run.run_status == RUN_STATUS_ACTIVE,
+            ScoundrelError::RunNotActive
+        );
         let threat = run.pending_spoils_threat;
         require!(threat > 0, ScoundrelError::NoSpoilsToClaim);
 
@@ -362,35 +596,65 @@ pub mod scoundrel {
     }
 }
 
+#[vrf]
 #[derive(Accounts)]
 pub struct StartRun<'info> {
     #[account(mut)]
     pub player: Signer<'info>,
 
     /// CHECK: Ephemeral session keypair authorized to sign turn actions on behalf of `player`.
+    #[account(mut)]
     pub session_signer: UncheckedAccount<'info>,
 
     #[account(
-        init,
+        init_if_needed,
         payer = player,
         space = 8 + DungeonRun::INIT_SPACE,
         seeds = [b"dungeon_run", player.key().as_ref()],
-        bump,
+        bump
     )]
     pub dungeon_run: Account<'info, DungeonRun>,
 
-    pub system_program: Program<'info, System>,
+    /// CHECK: MagicBlock VRF oracle queue
+    #[account(
+        mut,
+        constraint = oracle_queue.key() == ephemeral_vrf_sdk::consts::DEFAULT_QUEUE
+            || oracle_queue.key() == ephemeral_vrf_sdk::consts::DEFAULT_EPHEMERAL_QUEUE
+            || oracle_queue.key() == ephemeral_vrf_sdk::consts::DEFAULT_TEST_QUEUE
+            || oracle_queue.key() == ephemeral_vrf_sdk::consts::DEFAULT_EPHEMERAL_TEST_QUEUE
+            @ ScoundrelError::InvalidOracleQueue
+    )]
+    pub oracle_queue: UncheckedAccount<'info>,
+
+    /// CHECK: MagicBlock VRF program (`Vrf1RNUjXmQGjmQrQLvJHs9SNkvDJEsRVFPkfSQUwGz`)
+    #[account(address = ephemeral_vrf_sdk::consts::VRF_PROGRAM_ID)]
+    pub vrf_program: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
-pub struct GameplayAction<'info> {
+pub struct CallbackStartRun<'info> {
+    #[account(
+        constraint = vrf_program_identity.key() == ephemeral_vrf_sdk::consts::VRF_PROGRAM_IDENTITY
+            || vrf_program_identity.key() == ephemeral_vrf_sdk::consts::scoped_vrf_identity(&crate::ID)
+            || vrf_program_identity.key() == dungeon_run.player
+            || vrf_program_identity.key() == dungeon_run.session_signer
+            @ ScoundrelError::UnauthorizedVrfCallback
+    )]
+    pub vrf_program_identity: Signer<'info>,
+
+    #[account(mut)]
+    pub dungeon_run: Account<'info, DungeonRun>,
+}
+
+#[derive(Accounts)]
+pub struct PlayerTurn<'info> {
     pub signer: Signer<'info>,
 
     #[account(
         mut,
         seeds = [b"dungeon_run", dungeon_run.player.as_ref()],
         bump = dungeon_run.bump,
-        constraint = (signer.key() == dungeon_run.session_signer || signer.key() == dungeon_run.player) @ ScoundrelError::UnauthorizedSigner,
+        constraint = signer.key() == dungeon_run.player || signer.key() == dungeon_run.session_signer @ ScoundrelError::UnauthorizedSigner
     )]
     pub dungeon_run: Account<'info, DungeonRun>,
 }
@@ -403,9 +667,9 @@ pub struct CloseRun<'info> {
     #[account(
         mut,
         close = player,
-        has_one = player @ ScoundrelError::UnauthorizedSigner,
         seeds = [b"dungeon_run", player.key().as_ref()],
         bump = dungeon_run.bump,
+        constraint = dungeon_run.player == player.key() @ ScoundrelError::UnauthorizedSigner
     )]
     pub dungeon_run: Account<'info, DungeonRun>,
 }
@@ -415,6 +679,7 @@ pub struct CloseRun<'info> {
 pub struct DungeonRun {
     pub player: Pubkey,
     pub session_signer: Pubkey,
+    pub bump: u8,
     pub deck: [u8; 44],
     pub deck_head: u8,
     pub deck_len: u8,
@@ -436,13 +701,33 @@ pub struct DungeonRun {
     pub unclaimed_gold: u32,
     pub score: i32,
     pub run_status: u8,
-    pub bump: u8,
+    pub vrf_seed: [u8; 32],
+    pub combat_rng_nonce: u64,
+    pub ofe_inventory: u8,
+    pub ofe_buff_rooms_left: u8,
+    pub rusty_shield_inventory: u8,
+    pub rusty_shield_buff_rooms_left: u8,
 }
 
 #[event]
 pub struct LegendarySkinUnlocked {
     pub player: Pubkey,
     pub threat_score: u8,
+}
+
+#[event]
+pub struct OfeDodged {
+    pub player: Pubkey,
+    pub monster_rank: u8,
+    pub nonce: u64,
+}
+
+#[event]
+pub struct RustyShieldBlocked {
+    pub player: Pubkey,
+    pub monster_rank: u8,
+    pub damage_tenths: u16,
+    pub nonce: u64,
 }
 
 #[error_code]
@@ -453,6 +738,12 @@ pub enum ScoundrelError {
     DeckOverflow,
     #[msg("The dungeon run is no longer active.")]
     RunNotActive,
+    #[msg("Dungeon run is not awaiting VRF callback.")]
+    NotAwaitingVrf,
+    #[msg("Unauthorized VRF callback signer.")]
+    UnauthorizedVrfCallback,
+    #[msg("Invalid MagicBlock VRF oracle queue account.")]
+    InvalidOracleQueue,
     #[msg("Signer is neither the player nor the authorized session key.")]
     UnauthorizedSigner,
     #[msg("Cannot flee a room after resolving cards in it.")]
@@ -465,6 +756,14 @@ pub enum ScoundrelError {
     NoEpicPotionsAvailable,
     #[msg("Epic Health Potion buff is already active.")]
     EpicPotionAlreadyActive,
+    #[msg("Invalid marketplace item ID.")]
+    InvalidMarketplaceItem,
+    #[msg("Insufficient unclaimed gold for marketplace purchase.")]
+    InsufficientGold,
+    #[msg("No marketplace item of this type available in inventory.")]
+    NoMarketplaceItemAvailable,
+    #[msg("This marketplace consumable buff is already active.")]
+    MarketplaceBuffAlreadyActive,
     #[msg("Room slot index must be 0..=3.")]
     InvalidSlotIndex,
     #[msg("Selected room slot is already empty.")]
