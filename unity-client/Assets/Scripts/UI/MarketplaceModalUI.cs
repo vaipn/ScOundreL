@@ -35,12 +35,22 @@ namespace Scoundrel
         [SerializeField] private Button buyShieldButton;
         [SerializeField] private TextMeshProUGUI buyShieldButtonText;
 
+        [Header("Epic Health Elixir — 75 Gold")]
+        [SerializeField] private RectTransform potionCardContainer;
+        [SerializeField] private RectTransform potionVisualHolder;
+        [SerializeField] private TextMeshProUGUI potionTitleText;
+        [SerializeField] private TextMeshProUGUI potionDescText;
+        [SerializeField] private TextMeshProUGUI potionOwnedText;
+        [SerializeField] private Button buyPotionButton;
+        [SerializeField] private TextMeshProUGUI buyPotionButtonText;
+
         [Header("Shader Material")]
         [SerializeField] private Material sharedFoilMaterial;
 
         private ScoundrelGameManager _gameManager;
         private BalatroCardVisual _ofeCardVisual;
         private BalatroCardVisual _shieldCardVisual;
+        private BalatroCardVisual _potionCardVisual;
         private bool _isOpen;
         private readonly float _restingY = 0f;
         private readonly float _hiddenY = -980f;
@@ -67,6 +77,13 @@ namespace Scoundrel
             TextMeshProUGUI shieldOwned,
             Button buyShieldBtn,
             TextMeshProUGUI buyShieldBtnText,
+            RectTransform potionContainer,
+            RectTransform potionHolder,
+            TextMeshProUGUI potionTitle,
+            TextMeshProUGUI potionDesc,
+            TextMeshProUGUI potionOwned,
+            Button buyPotionBtn,
+            TextMeshProUGUI buyPotionBtnText,
             Material foilMat)
         {
             _gameManager = manager;
@@ -90,6 +107,13 @@ namespace Scoundrel
             shieldOwnedText = shieldOwned;
             buyShieldButton = buyShieldBtn;
             buyShieldButtonText = buyShieldBtnText;
+            potionCardContainer = potionContainer;
+            potionVisualHolder = potionHolder;
+            potionTitleText = potionTitle;
+            potionDescText = potionDesc;
+            potionOwnedText = potionOwned;
+            buyPotionButton = buyPotionBtn;
+            buyPotionButtonText = buyPotionBtnText;
             sharedFoilMaterial = foilMat;
         }
 
@@ -149,6 +173,12 @@ namespace Scoundrel
                 buyShieldButton.onClick.RemoveAllListeners();
                 buyShieldButton.onClick.AddListener(() => OnBuyClicked((int)MarketplaceItemId.RustyShield));
             }
+
+            if (buyPotionButton != null)
+            {
+                buyPotionButton.onClick.RemoveAllListeners();
+                buyPotionButton.onClick.AddListener(() => OnBuyClicked((int)MarketplaceItemId.EpicPotion));
+            }
         }
 
         private void EnsureCardVisuals()
@@ -171,6 +201,15 @@ namespace Scoundrel
                 _shieldCardVisual.RectTransform.anchoredPosition = Vector2.zero;
                 _shieldCardVisual.SetupCustomSprite(shieldSprite, false, false, sharedFoilMaterial);
                 _shieldCardVisual.OnCardClicked += _ => OnBuyClicked((int)MarketplaceItemId.RustyShield);
+            }
+
+            if (potionVisualHolder != null && _potionCardVisual == null)
+            {
+                Sprite potionSprite = ScoundrelResources.LoadSprite(ScoundrelAssetPaths.CardEpicPotion);
+                _potionCardVisual = BalatroCardVisual.CreateCardVisual(potionVisualHolder, previewSize, sharedFoilMaterial);
+                _potionCardVisual.RectTransform.anchoredPosition = Vector2.zero;
+                _potionCardVisual.SetupCustomSprite(potionSprite, false, false, sharedFoilMaterial);
+                _potionCardVisual.OnCardClicked += _ => OnBuyClicked((int)MarketplaceItemId.EpicPotion);
             }
         }
 
@@ -267,9 +306,12 @@ namespace Scoundrel
         {
             if (state == null) return;
 
+            ulong mintedAta = _gameManager?.Bridge != null ? _gameManager.Bridge.LastKnownMintedGoldBalance : 0UL;
+            ulong totalGold = (ulong)state.UnclaimedGold + mintedAta;
+
             if (goldBalanceText != null)
             {
-                goldBalanceText.text = $"AVAILABLE TREASURY: {state.UnclaimedGold} SPL GOLD";
+                goldBalanceText.text = $"AVAILABLE TREASURY: {state.UnclaimedGold} RUN + {mintedAta} MINTED ATA = <color=#FFD954>{totalGold} GOLD</color>";
             }
 
             if (ofeOwnedText != null)
@@ -282,7 +324,7 @@ namespace Scoundrel
 
             if (buyOfeButton != null)
             {
-                bool canBuyOfe = state.CanBuyOfe;
+                bool canBuyOfe = state.CanAffordItem(MarketplaceItemId.OfeCharm, mintedAta);
                 buyOfeButton.interactable = canBuyOfe;
                 if (buyOfeButtonText != null)
                 {
@@ -302,13 +344,33 @@ namespace Scoundrel
 
             if (buyShieldButton != null)
             {
-                bool canBuyShield = state.CanBuyRustyShield;
+                bool canBuyShield = state.CanAffordItem(MarketplaceItemId.RustyShield, mintedAta);
                 buyShieldButton.interactable = canBuyShield;
                 if (buyShieldButtonText != null)
                 {
                     buyShieldButtonText.text = canBuyShield
                         ? "BUY (45 GOLD)"
                         : "NEED 45 GOLD";
+                }
+            }
+
+            if (potionOwnedText != null)
+            {
+                string activePart = state.EpicPotionBuffRoomsLeft > 0
+                    ? $"  •  ACTIVE ({state.EpicPotionBuffRoomsLeft}R LEFT)"
+                    : "";
+                potionOwnedText.text = $"Owned in Rack: x{state.EpicPotionsInventory}{activePart}";
+            }
+
+            if (buyPotionButton != null)
+            {
+                bool canBuyPotion = state.CanAffordItem(MarketplaceItemId.EpicPotion, mintedAta);
+                buyPotionButton.interactable = canBuyPotion;
+                if (buyPotionButtonText != null)
+                {
+                    buyPotionButtonText.text = canBuyPotion
+                        ? "BUY (75 GOLD)"
+                        : "NEED 75 GOLD";
                 }
             }
         }
@@ -327,7 +389,7 @@ namespace Scoundrel
         {
             RectTransform targetCard = itemId == (int)MarketplaceItemId.OfeCharm
                 ? ofeCardContainer
-                : shieldCardContainer;
+                : (itemId == (int)MarketplaceItemId.RustyShield ? shieldCardContainer : potionCardContainer);
 
             if (targetCard != null)
             {

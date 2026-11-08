@@ -1,3 +1,5 @@
+using System;
+using System.Threading.Tasks;
 using DG.Tweening;
 using TMPro;
 using UnityEngine;
@@ -34,8 +36,13 @@ namespace Scoundrel
         [SerializeField] private TextMeshProUGUI mintGoldButtonText;
         [SerializeField] private Button copyAddressButton;
         [SerializeField] private TextMeshProUGUI copyAddressButtonText;
+        [SerializeField] private Button viewExplorerButton;
+        [SerializeField] private TextMeshProUGUI viewExplorerButtonText;
+        [SerializeField] private Button startOnChainRunButton;
+        [SerializeField] private TextMeshProUGUI startOnChainRunButtonText;
 
         private ScoundrelGameManager _gameManager;
+        private CopyButtonGestureHook _copyGestureHook;
         private bool _isOpen;
         private readonly float _restingY = 0f;
         private readonly float _hiddenY = -980f;
@@ -61,7 +68,11 @@ namespace Scoundrel
             Button mintBtn,
             TextMeshProUGUI mintBtnText,
             Button copyBtn,
-            TextMeshProUGUI copyBtnText)
+            TextMeshProUGUI copyBtnText,
+            Button explorerBtn = null,
+            TextMeshProUGUI explorerBtnText = null,
+            Button startRunBtn = null,
+            TextMeshProUGUI startRunBtnText = null)
         {
             _gameManager = manager;
             backdropGroup = backdrop;
@@ -84,6 +95,10 @@ namespace Scoundrel
             mintGoldButtonText = mintBtnText;
             copyAddressButton = copyBtn;
             copyAddressButtonText = copyBtnText;
+            viewExplorerButton = explorerBtn;
+            viewExplorerButtonText = explorerBtnText;
+            startOnChainRunButton = startRunBtn;
+            startOnChainRunButtonText = startRunBtnText;
         }
 
         private void Awake()
@@ -107,6 +122,8 @@ namespace Scoundrel
                 {
                     _gameManager.Bridge.OnBridgeStatusChanged += HandleBridgeStatusChanged;
                     _gameManager.Bridge.OnWalletStateChanged += RefreshView;
+                    _gameManager.Bridge.OnPlayerProfileChanged += _ => RefreshView();
+                    _gameManager.Bridge.OnLeaderboardChanged += _ => RefreshView();
                 }
             }
         }
@@ -158,6 +175,8 @@ namespace Scoundrel
                 toggleModeButton.onClick.AddListener(OnToggleModeClicked);
             }
 
+            _copyGestureHook?.RefreshArmedText();
+
             if (mintGoldButton != null)
             {
                 mintGoldButton.onClick.RemoveAllListeners();
@@ -168,6 +187,24 @@ namespace Scoundrel
             {
                 copyAddressButton.onClick.RemoveAllListeners();
                 copyAddressButton.onClick.AddListener(OnCopyAddressClicked);
+                _copyGestureHook = copyAddressButton.GetComponent<CopyButtonGestureHook>();
+                if (_copyGestureHook == null)
+                {
+                    _copyGestureHook = copyAddressButton.gameObject.AddComponent<CopyButtonGestureHook>();
+                }
+                _copyGestureHook.Bind(() => _gameManager?.Bridge?.ActivePlayerPubkey);
+            }
+
+            if (viewExplorerButton != null)
+            {
+                viewExplorerButton.onClick.RemoveAllListeners();
+                viewExplorerButton.onClick.AddListener(OnViewExplorerClicked);
+            }
+
+            if (startOnChainRunButton != null)
+            {
+                startOnChainRunButton.onClick.RemoveAllListeners();
+                startOnChainRunButton.onClick.AddListener(OnStartOnChainRunClicked);
             }
         }
 
@@ -188,6 +225,8 @@ namespace Scoundrel
             if (_gameManager?.Bridge != null)
             {
                 _ = _gameManager.Bridge.RefreshBalancesAsync();
+                _ = _gameManager.Bridge.RefreshOnChainStatsAsync();
+                _ = CheckAndSyncOnChainRunAsync();
             }
 
             RefreshView();
@@ -216,6 +255,7 @@ namespace Scoundrel
         {
             if (!_isOpen) return;
             _isOpen = false;
+            WebGLClipboard.Disarm();
 
             WeaponSkinFXController.Instance?.PlayCardHover();
 
@@ -245,6 +285,7 @@ namespace Scoundrel
         public void HideImmediate()
         {
             _isOpen = false;
+            WebGLClipboard.Disarm();
             if (backdropGroup != null)
             {
                 backdropGroup.DOKill();
@@ -317,12 +358,31 @@ namespace Scoundrel
                 string goldMint = string.IsNullOrEmpty(bridge.GoldMintPdaAddress) ? "Not Derived" : bridge.GoldMintPdaAddress;
                 string goldAta = string.IsNullOrEmpty(bridge.PlayerGoldAtaAddress) ? "Not Derived" : bridge.PlayerGoldAtaAddress;
 
+                string vrfShort = state != null ? state.FormatVrfSeedShort() : "0x00000000";
+                string vrfStatus = (state != null && state.Status == RunStatus.AwaitingVrf)
+                    ? "<color=#FFD954>Awaiting MagicBlock VRF Oracle Callback...</color>"
+                    : (bridge.HasActiveOnChainSession
+                        ? $"<color=#5EFCA8>Verified MagicBlock VRF ({vrfShort}) • Nonce: {(state != null ? state.CombatRngNonce : 0)}</color>"
+                        : $"<color=#FFD954>Local Sim Seed ({vrfShort}) • Connect Wallet for Devnet VRF</color>");
+
+                var prof = bridge.CurrentProfile;
+                string profileStats = (prof != null && prof.RunsStarted > 0)
+                    ? $"<b>Player Profile PDA:</b>  Runs: {prof.RunsStarted}   •   Wins: {prof.Victories}   •   Slain: {prof.MonstersSlain}   •   Best Score: {prof.BestScore}   •   Minted: {prof.TotalGoldMinted}g   •   Spent: {prof.TotalGoldSpent}g\n"
+                    : "<b>Player Profile PDA:</b>  <i>Initialized on First Devnet VRF Run</i>\n";
+
+                var lb = bridge.CurrentLeaderboard;
+                string lbSummary = (lb != null && lb.EntryCount > 0)
+                    ? $"<b>Devnet Leaderboard Top #{Mathf.Min(3, (int)lb.EntryCount)}:</b>  {FormatTopLeaderboardEntry(lb, 0)}  |  {FormatTopLeaderboardEntry(lb, 1)}"
+                    : "<b>Devnet Leaderboard:</b>  <i>Global PDA tracking Top-10 Devnet runs</i>";
+
                 walletAddressesText.text =
                     $"<b>Program ID:</b>  {bridge.ProgramId}   •   <b>RPC:</b>  {bridge.RpcUrl}\n" +
                     $"<b>Player Wallet:</b>  {playerKey}\n" +
                     $"<b>Ephemeral Session Key:</b>  {sessionKey}\n" +
-                    $"<b>DungeonRun PDA:</b>  {pdaKey}\n" +
-                    $"<b>SPL Gold Mint PDA:</b>  {goldMint}   •   <b>Player Gold ATA:</b>  {goldAta}";
+                    $"<b>DungeonRun PDA:</b>  {pdaKey}   •   <b>VRF Proof:</b>  {vrfStatus}\n" +
+                    $"<b>SPL Gold Mint PDA:</b>  {goldMint}   •   <b>Gold ATA:</b>  {goldAta}\n" +
+                    $"{profileStats}" +
+                    $"{lbSummary}";
             }
 
             if (balancesSummaryText != null)
@@ -335,10 +395,21 @@ namespace Scoundrel
 
             if (bridgeStatusText != null && bridge != null)
             {
+                string displayStatus = bridge.LastStatusMessage;
+                if (state != null && state.Status == RunStatus.Active && bridge.HasActiveOnChainSession)
+                {
+                    if (string.IsNullOrEmpty(displayStatus) ||
+                        displayStatus.StartsWith("Requesting", StringComparison.OrdinalIgnoreCase) ||
+                        displayStatus.StartsWith("Awaiting", StringComparison.OrdinalIgnoreCase))
+                    {
+                        displayStatus = $"On-Chain VRF Active • Session Key Ready ({state.FormatVrfSeedShort()})";
+                    }
+                }
+
                 string sigSuffix = string.IsNullOrEmpty(bridge.LastTransactionSignature)
                     ? ""
                     : $"   •   Last Tx: {bridge.LastTransactionSignature.Substring(0, Mathf.Min(12, bridge.LastTransactionSignature.Length))}..";
-                bridgeStatusText.text = $"Status: {bridge.LastStatusMessage}   •   Settled Txs: {bridge.SettledTransactionCount}{sigSuffix}";
+                bridgeStatusText.text = $"Status: {displayStatus}   •   Settled Txs: {bridge.SettledTransactionCount}{sigSuffix}";
             }
 
             if (toggleModeButtonText != null)
@@ -347,6 +418,8 @@ namespace Scoundrel
                     ? "SWITCH TO DEVNET LIVE"
                     : "SWITCH TO LOCAL VRF SIM";
             }
+
+            _copyGestureHook?.RefreshArmedText();
 
             if (mintGoldButton != null)
             {
@@ -359,6 +432,23 @@ namespace Scoundrel
                         : "NO UNCLAIMED GOLD TO MINT";
                 }
             }
+
+            if (viewExplorerButton != null)
+            {
+                viewExplorerButton.interactable = bridge != null && (!string.IsNullOrEmpty(bridge.DungeonRunPdaAddress) || !string.IsNullOrEmpty(bridge.LastTransactionSignature));
+            }
+        }
+
+        private static string FormatTopLeaderboardEntry(LeaderboardData lb, int index)
+        {
+            if (lb == null || lb.Entries == null || index >= lb.EntryCount || index >= lb.Entries.Count)
+            {
+                return "";
+            }
+            var e = lb.Entries[index];
+            string player = string.IsNullOrEmpty(e.PlayerPubkey) ? "Unknown" : e.PlayerPubkey;
+            string playerShort = player.Length > 8 ? player.Substring(0, 4) + ".." + player.Substring(player.Length - 4) : player;
+            return $"#{index + 1} {playerShort} ({e.Score} pts, {(e.Victory ? "WIN" : "LOSS")})";
         }
 
         private async void OnConnectWalletAdapterClicked()
@@ -394,13 +484,55 @@ namespace Scoundrel
             RefreshView();
         }
 
+        private void OnViewExplorerClicked()
+        {
+            if (_gameManager?.Bridge == null) return;
+            WeaponSkinFXController.Instance?.PlayCardHover();
+            if (!string.IsNullOrEmpty(_gameManager.Bridge.LastTransactionSignature))
+            {
+                _gameManager.Bridge.OpenExplorerForTx(_gameManager.Bridge.LastTransactionSignature);
+            }
+            else if (!string.IsNullOrEmpty(_gameManager.Bridge.DungeonRunPdaAddress))
+            {
+                _gameManager.Bridge.OpenExplorerForAddress(_gameManager.Bridge.DungeonRunPdaAddress);
+            }
+        }
+
+        private async Task CheckAndSyncOnChainRunAsync()
+        {
+            if (_gameManager?.Bridge == null || _gameManager.Bridge.OfflineSimulationMode) return;
+            try
+            {
+                var run = await _gameManager.Bridge.FetchCurrentDungeonRunAsync();
+                if (run != null && run.Status == RunStatus.Active && (_gameManager.State == null || _gameManager.State.Status == RunStatus.AwaitingVrf || !_gameManager.Bridge.HasActiveOnChainSession))
+                {
+                    _gameManager.Bridge.MarkActiveOnChainSession(true);
+                    _gameManager.Bridge.SetStatusMessage($"On-Chain VRF Active • Session Key Ready ({run.FormatVrfSeedShort()})");
+                    _gameManager.ReconcileFromOnChainState(run);
+                    if (_isOpen) RefreshView();
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[WalletConnectModalUI] CheckAndSyncOnChainRunAsync error: {ex.Message}");
+            }
+        }
+
+        private void OnStartOnChainRunClicked()
+        {
+            if (_gameManager == null) return;
+            WeaponSkinFXController.Instance?.PlayCardDeal();
+            CloseModal();
+            _ = _gameManager.StartOnChainVrfRunAsync();
+        }
+
         private void OnCopyAddressClicked()
         {
             if (_gameManager?.Bridge == null) return;
             string addr = _gameManager.Bridge.ActivePlayerPubkey;
             if (!string.IsNullOrEmpty(addr))
             {
-                GUIUtility.systemCopyBuffer = addr;
+                WebGLClipboard.Copy(addr);
                 if (copyAddressButtonText != null)
                 {
                     copyAddressButtonText.text = "COPIED PUBKEY!";

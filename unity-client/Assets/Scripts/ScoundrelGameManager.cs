@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Security.Cryptography;
+using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.Events;
 
@@ -103,6 +104,11 @@ namespace Scoundrel
 
         public void StartNewRun(ulong? explicitSeed = null, bool? overrideLegendaryNft = null)
         {
+            if (solanaBridge != null && solanaBridge.HasConnectedWallet && !solanaBridge.OfflineSimulationMode)
+            {
+                _ = StartOnChainVrfRunAsync();
+                return;
+            }
             byte[] vrfSeed = new byte[32];
             if (explicitSeed.HasValue)
             {
@@ -169,6 +175,66 @@ namespace Scoundrel
             InvokeRoomDealt();
         }
 
+        public async Task<bool> StartOnChainVrfRunAsync(byte? clientSeed = null)
+        {
+            byte seedByte = clientSeed ?? (byte)UnityEngine.Random.Range(1, 255);
+            bool hasLegendary = enableLegendaryWeapons && startWithLegendaryNft;
+
+            State = new DungeonRunState
+            {
+                HpTenths = 200,
+                MaxHpTenths = 200,
+                EquippedWeaponRank = 0,
+                EquippedWeaponCardId = -1,
+                WeaponCeiling = 0,
+                HasLegendarySkin = hasLegendary,
+                LegendaryForgedEdgeCharges = hasLegendary ? (byte)1 : (byte)0,
+                PotionUsedThisRoom = false,
+                FirstPotionHealedTenths = 0,
+                EpicPotionsInventory = 0,
+                EpicPotionBuffRoomsLeft = 0,
+                FledLastRoom = false,
+                RoomThreatAccumulator = 0,
+                PendingSpoilsThreat = 0,
+                UnclaimedGold = 0,
+                Score = 0,
+                Status = RunStatus.AwaitingVrf,
+                VrfSeed = new byte[32],
+                CombatRngNonce = 0,
+                OfeInventory = 0,
+                OfeBuffRoomsLeft = 0,
+                RustyShieldInventory = 0,
+                RustyShieldBuffRoomsLeft = 0,
+                CardsResolvedInRoom = 0,
+                DiscardCount = 0,
+                Room = new int[] { -1, -1, -1, -1 },
+                DeckHead = 0,
+                DeckLen = 0,
+                SessionSignerPubkey = solanaBridge != null ? solanaBridge.ActiveSessionPubkey : string.Empty
+            };
+
+            NotifyStateChanged();
+
+            if (solanaBridge == null)
+            {
+                StartNewRun(null, hasLegendary);
+                return true;
+            }
+
+            bool ok = await solanaBridge.StartRunAsync(seedByte, (onChainState) =>
+            {
+                ReconcileFromOnChainState(onChainState);
+            });
+
+            if (!ok || State.Status == RunStatus.AwaitingVrf)
+            {
+                StartNewRun(null, hasLegendary);
+                return false;
+            }
+
+            return true;
+        }
+
         public void ReconcileFromOnChainState(DungeonRunState onChainState)
         {
             if (onChainState == null) return;
@@ -185,6 +251,14 @@ namespace Scoundrel
                 State.EquippedWeaponCardId = existingWeaponCardId;
             }
             State.DiscardCount = existingDiscardCount;
+
+            if (State.Status == RunStatus.Active && State.IsRoomEmpty() && State.DeckLen > 0)
+            {
+                for (int slot = 0; slot < 4; slot++)
+                {
+                    State.Room[slot] = DrawCardFromTop(State);
+                }
+            }
 
             NotifyStateChanged();
             InvokeRoomDealt();
@@ -250,41 +324,52 @@ namespace Scoundrel
         {
             if (State.Status != RunStatus.Active) return false;
 
+            uint price = DungeonRunState.GetItemPrice((MarketplaceItemId)itemId);
+            if (price == 0) return false;
+
+            ulong mintedAta = solanaBridge != null ? solanaBridge.LastKnownMintedGoldBalance : 0UL;
+            ulong totalGold = (ulong)State.UnclaimedGold + mintedAta;
+            if (totalGold < price) return false;
+
+            uint fromUnclaimed = Math.Min(State.UnclaimedGold, price);
+            uint deficit = price - fromUnclaimed;
+
+            State.UnclaimedGold -= fromUnclaimed;
+            if (deficit > 0 && solanaBridge != null)
+            {
+                solanaBridge.AdjustMintedBalance(-(long)deficit);
+            }
+
+            int newCount = 0;
             if (itemId == (int)MarketplaceItemId.OfeCharm)
             {
-                if (!State.CanBuyOfe) return false;
-                State.UnclaimedGold -= DungeonRunState.OfeCostGold;
                 State.OfeInventory = (byte)Mathf.Min(255, State.OfeInventory + 1);
-
-                if (solanaBridge != null)
-                {
-                    solanaBridge.DispatchBuyItem((byte)MarketplaceItemId.OfeCharm);
-                }
-
-                NotifyStateChanged();
-                OnMarketplaceItemBought?.Invoke(itemId, State.OfeInventory);
-                onMarketplaceItemBought?.Invoke(itemId, State.OfeInventory);
-                return true;
+                newCount = State.OfeInventory;
             }
-
-            if (itemId == (int)MarketplaceItemId.RustyShield)
+            else if (itemId == (int)MarketplaceItemId.RustyShield)
             {
-                if (!State.CanBuyRustyShield) return false;
-                State.UnclaimedGold -= DungeonRunState.RustyShieldCostGold;
                 State.RustyShieldInventory = (byte)Mathf.Min(255, State.RustyShieldInventory + 1);
-
-                if (solanaBridge != null)
-                {
-                    solanaBridge.DispatchBuyItem((byte)MarketplaceItemId.RustyShield);
-                }
-
-                NotifyStateChanged();
-                OnMarketplaceItemBought?.Invoke(itemId, State.RustyShieldInventory);
-                onMarketplaceItemBought?.Invoke(itemId, State.RustyShieldInventory);
-                return true;
+                newCount = State.RustyShieldInventory;
+            }
+            else if (itemId == (int)MarketplaceItemId.EpicPotion)
+            {
+                State.EpicPotionsInventory = (byte)Mathf.Min(255, State.EpicPotionsInventory + 1);
+                newCount = State.EpicPotionsInventory;
+            }
+            else
+            {
+                return false;
             }
 
-            return false;
+            if (solanaBridge != null)
+            {
+                solanaBridge.DispatchBuyItem((byte)itemId);
+            }
+
+            NotifyStateChanged();
+            OnMarketplaceItemBought?.Invoke(itemId, newCount);
+            onMarketplaceItemBought?.Invoke(itemId, newCount);
+            return true;
         }
 
         public bool UseMarketplaceItem(int itemId)
@@ -328,20 +413,35 @@ namespace Scoundrel
             return false;
         }
 
-        public bool TryMintGoldTokens()
+        public async Task<bool> MintGoldTokensAsync()
         {
             if (State == null || State.UnclaimedGold == 0) return false;
 
             uint amountToMint = State.UnclaimedGold;
-            State.UnclaimedGold = 0;
-
             if (solanaBridge != null)
             {
-                solanaBridge.DispatchClaimGoldTokens(amountToMint);
+                bool success = await solanaBridge.ClaimGoldTokensAsync(amountToMint);
+                if (success)
+                {
+                    State.UnclaimedGold = 0;
+                    NotifyStateChanged();
+                    OnGoldTokensMinted?.Invoke(amountToMint);
+                    return true;
+                }
+                return false;
             }
+            else
+            {
+                State.UnclaimedGold = 0;
+                NotifyStateChanged();
+                OnGoldTokensMinted?.Invoke(amountToMint);
+                return true;
+            }
+        }
 
-            NotifyStateChanged();
-            OnGoldTokensMinted?.Invoke(amountToMint);
+        public bool TryMintGoldTokens()
+        {
+            _ = MintGoldTokensAsync();
             return true;
         }
 
