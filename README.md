@@ -1,4 +1,4 @@
-# ⚔️ Scoundrel: On-Chain Dungeon Crawler on Solana
+# ⚔️ ScOundreL: On-Chain Dungeon Crawler on Solana
 
 [![Solana Devnet](https://img.shields.io/badge/Solana-Devnet-14F195?logo=solana&logoColor=white)](https://explorer.solana.com/address/7r9dGYN2WiNKgr7wD89Heh4rrWX1zkGhxs8ckjKfbNQx?cluster=devnet)
 [![MagicBlock VRF](https://img.shields.io/badge/MagicBlock-VRF%20v0.17-7B2BF9)](https://docs.magicblock.gg/pages/randomness/)
@@ -6,7 +6,7 @@
 [![Anchor](https://img.shields.io/badge/Anchor-0.30.1-blue)](https://www.anchor-lang.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Scoundrel** is a tactical single-player roguelike card crawler built for the [Solana Hackathon](https://events.mlh.com/events/15200-solana-hackathon), combining tactile tabletop visuals in **Unity 6 WebGL** with complete on-chain game state, **MagicBlock Verifiable Randomness (VRF)**, **Ephemeral Session Keys**, **SPL Token Gold minting**, persistent **Player Profiles**, and a global **Top-10 Leaderboard**.
+**ScOundreL** is a tactical single-player roguelike card crawler built for the [Solana Hackathon](https://events.mlh.com/events/15200-solana-hackathon), combining tactile tabletop visuals in **Unity 6 WebGL** with complete on-chain game state, **MagicBlock Verifiable Randomness (VRF)**, **Ephemeral Session Keys**, **SPL Token Gold minting**, persistent **Player Profiles**, and a global **Top-10 Leaderboard**.
 
 ---
 
