@@ -11,13 +11,18 @@ pub const SPL_TOKEN_PROGRAM_ID: Pubkey = pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuB
 pub const ASSOCIATED_TOKEN_PROGRAM_ID: Pubkey =
     pubkey!("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 pub const GOLD_MINT_SEED: &[u8] = b"scoundrel_gold_mint";
+pub const PROFILE_SEED: &[u8] = b"profile";
+pub const LEADERBOARD_SEED: &[u8] = b"leaderboard";
+
 pub const SPL_MINT_LEN: usize = 82;
+pub const SPL_TOKEN_ACCOUNT_MIN_LEN: usize = 165;
 pub const SPL_GOLD_DECIMALS: u8 = 0;
 
 pub const DECK_SIZE: usize = 44;
 pub const ROOM_SIZE: usize = 4;
 pub const MAX_HP_TENTHS: u16 = 200;
 pub const LEGENDARY_WEAPONS_ENABLED: bool = false;
+pub const LEADERBOARD_SIZE: usize = 10;
 
 pub const RUN_STATUS_ACTIVE: u8 = 0;
 pub const RUN_STATUS_VICTORY: u8 = 1;
@@ -26,9 +31,265 @@ pub const RUN_STATUS_AWAITING_VRF: u8 = 3;
 
 pub const ITEM_OFE_CHARM: u8 = 0;
 pub const ITEM_RUSTY_SHIELD: u8 = 1;
+pub const ITEM_EPIC_POTION: u8 = 2;
+
 pub const PRICE_OFE_CHARM: u32 = 60;
 pub const PRICE_RUSTY_SHIELD: u32 = 45;
-pub const SESSION_SIGNER_MIN_LAMPORTS: u64 = 5_000_000;
+pub const PRICE_EPIC_POTION: u32 = 75;
+
+/// Covers ~100 session-signed turns, first-ever Gold mint / ATA creation if needed, and Leaderboard init.
+pub const SESSION_SIGNER_MIN_LAMPORTS: u64 = 10_000_000;
+/// Bounded SPL Gold delegate cap per run for the ephemeral session key.
+pub const MAX_SESSION_GOLD_ALLOWANCE: u64 = 1_000;
+
+fn item_price(item_id: u8) -> Result<u32> {
+    match item_id {
+        ITEM_OFE_CHARM => Ok(PRICE_OFE_CHARM),
+        ITEM_RUSTY_SHIELD => Ok(PRICE_RUSTY_SHIELD),
+        ITEM_EPIC_POTION => Ok(PRICE_EPIC_POTION),
+        _ => err!(ScoundrelError::InvalidMarketplaceItem),
+    }
+}
+
+fn expected_gold_ata(player: &Pubkey, gold_mint: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            player.as_ref(),
+            SPL_TOKEN_PROGRAM_ID.as_ref(),
+            gold_mint.as_ref(),
+        ],
+        &ASSOCIATED_TOKEN_PROGRAM_ID,
+    )
+    .0
+}
+
+/// Validates SPL Token account owner, byte length, mint, and token owner, returning `(amount, delegate, delegated_amount)`.
+fn read_validated_token_account(
+    token_account: &AccountInfo,
+    expected_mint: &Pubkey,
+    expected_owner: &Pubkey,
+) -> Result<(u64, Option<Pubkey>, u64)> {
+    if token_account.data_is_empty() {
+        return Ok((0, None, 0));
+    }
+    require_keys_eq!(
+        *token_account.owner,
+        SPL_TOKEN_PROGRAM_ID,
+        ScoundrelError::InvalidTokenProgram
+    );
+    let data = token_account.try_borrow_data()?;
+    require!(
+        data.len() >= SPL_TOKEN_ACCOUNT_MIN_LEN,
+        ScoundrelError::InvalidPlayerGoldAta
+    );
+
+    let mint = Pubkey::new_from_array(data[0..32].try_into().unwrap());
+    let owner = Pubkey::new_from_array(data[32..64].try_into().unwrap());
+    require_keys_eq!(mint, *expected_mint, ScoundrelError::InvalidPlayerGoldAta);
+    require_keys_eq!(owner, *expected_owner, ScoundrelError::InvalidPlayerGoldAta);
+
+    let amount = u64::from_le_bytes(data[64..72].try_into().unwrap());
+    let delegate_tag = u32::from_le_bytes(data[72..76].try_into().unwrap());
+    let delegate = if delegate_tag == 1 {
+        Some(Pubkey::new_from_array(data[76..108].try_into().unwrap()))
+    } else {
+        None
+    };
+    let delegated_amount = u64::from_le_bytes(data[121..129].try_into().unwrap());
+
+    Ok((amount, delegate, delegated_amount))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ensure_gold_mint_and_ata<'info>(
+    payer: &AccountInfo<'info>,
+    player: &AccountInfo<'info>,
+    gold_mint: &AccountInfo<'info>,
+    mint_bump: u8,
+    player_gold_ata: &AccountInfo<'info>,
+    token_program: &AccountInfo<'info>,
+    system_program: &AccountInfo<'info>,
+) -> Result<()> {
+    let expected_ata = expected_gold_ata(player.key, gold_mint.key);
+    require_keys_eq!(
+        *player_gold_ata.key,
+        expected_ata,
+        ScoundrelError::InvalidPlayerGoldAta
+    );
+
+    let mint_seeds: &[&[u8]] = &[GOLD_MINT_SEED, &[mint_bump]];
+
+    if gold_mint.data_is_empty() {
+        let rent_lamports = Rent::get()?.minimum_balance(SPL_MINT_LEN);
+        anchor_lang::system_program::create_account(
+            CpiContext::new_with_signer(
+                *system_program.key,
+                anchor_lang::system_program::CreateAccount {
+                    from: payer.clone(),
+                    to: gold_mint.clone(),
+                },
+                &[mint_seeds],
+            ),
+            rent_lamports,
+            SPL_MINT_LEN as u64,
+            &SPL_TOKEN_PROGRAM_ID,
+        )?;
+
+        // SPL Token InitializeMint2 (tag = 20, decimals = 0, mint_authority = gold_mint, freeze_authority = None)
+        let mut init_mint_data = Vec::with_capacity(35);
+        init_mint_data.push(20u8);
+        init_mint_data.push(SPL_GOLD_DECIMALS);
+        init_mint_data.extend_from_slice(gold_mint.key.as_ref());
+        init_mint_data.push(0u8);
+
+        let init_mint_ix = Instruction {
+            program_id: SPL_TOKEN_PROGRAM_ID,
+            accounts: vec![AccountMeta::new(*gold_mint.key, false)],
+            data: init_mint_data,
+        };
+        invoke(&init_mint_ix, &[gold_mint.clone()])?;
+    } else {
+        require_keys_eq!(
+            *gold_mint.owner,
+            SPL_TOKEN_PROGRAM_ID,
+            ScoundrelError::InvalidTokenProgram
+        );
+    }
+
+    if player_gold_ata.data_is_empty() {
+        // Associated Token Account CreateIdempotent (discriminator = 1u8)
+        let create_ata_ix = Instruction {
+            program_id: ASSOCIATED_TOKEN_PROGRAM_ID,
+            accounts: vec![
+                AccountMeta::new(*payer.key, true),
+                AccountMeta::new(*player_gold_ata.key, false),
+                AccountMeta::new_readonly(*player.key, false),
+                AccountMeta::new_readonly(*gold_mint.key, false),
+                AccountMeta::new_readonly(*system_program.key, false),
+                AccountMeta::new_readonly(SPL_TOKEN_PROGRAM_ID, false),
+            ],
+            data: vec![1u8],
+        };
+        invoke(
+            &create_ata_ix,
+            &[
+                payer.clone(),
+                player_gold_ata.clone(),
+                player.clone(),
+                gold_mint.clone(),
+                system_program.clone(),
+                token_program.clone(),
+            ],
+        )?;
+    } else {
+        let _ = read_validated_token_account(player_gold_ata, gold_mint.key, player.key)?;
+    }
+
+    Ok(())
+}
+
+fn approve_session_delegate<'info>(
+    player_signer: &AccountInfo<'info>,
+    player_gold_ata: &AccountInfo<'info>,
+    session_signer: &AccountInfo<'info>,
+    allowance: u64,
+) -> Result<()> {
+    let bounded = allowance.min(MAX_SESSION_GOLD_ALLOWANCE);
+    // SPL Token Approve (tag = 4, amount: u64 LE)
+    let mut approve_data = Vec::with_capacity(9);
+    approve_data.push(4u8);
+    approve_data.extend_from_slice(&bounded.to_le_bytes());
+
+    let approve_ix = Instruction {
+        program_id: SPL_TOKEN_PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(*player_gold_ata.key, false),
+            AccountMeta::new_readonly(*session_signer.key, false),
+            AccountMeta::new_readonly(*player_signer.key, true),
+        ],
+        data: approve_data,
+    };
+    invoke(
+        &approve_ix,
+        &[
+            player_gold_ata.clone(),
+            session_signer.clone(),
+            player_signer.clone(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn sync_profile_identity(profile: &mut PlayerProfile, player: Pubkey, bump: u8, vrf_seed: &[u8; 32]) {
+    if profile.player == Pubkey::default() {
+        profile.player = player;
+        profile.bump = bump;
+    }
+    if *vrf_seed != [0u8; 32] {
+        profile.last_vrf_seed = *vrf_seed;
+    }
+}
+
+fn record_run_completion(
+    profile: &mut PlayerProfile,
+    leaderboard: &mut Leaderboard,
+    leaderboard_bump: u8,
+    run: &DungeonRun,
+    victory: bool,
+    timestamp: i64,
+) {
+    if victory {
+        profile.victories = profile.victories.saturating_add(1);
+    } else {
+        profile.defeats = profile.defeats.saturating_add(1);
+    }
+
+    if !profile.has_completed_run || run.score > profile.best_score {
+        profile.best_score = run.score;
+        profile.has_completed_run = true;
+    }
+
+    leaderboard.bump = leaderboard_bump;
+    leaderboard.total_runs_completed = leaderboard.total_runs_completed.saturating_add(1);
+
+    let mut vrf_prefix = [0u8; 8];
+    vrf_prefix.copy_from_slice(&run.vrf_seed[0..8]);
+
+    let candidate = LeaderboardEntry {
+        player: run.player,
+        score: run.score,
+        hp_tenths: run.hp_tenths,
+        victory,
+        vrf_seed_prefix: vrf_prefix,
+        timestamp,
+    };
+
+    let current_len = (leaderboard.entry_count as usize).min(LEADERBOARD_SIZE);
+    let mut insert_idx: Option<usize> = None;
+
+    for idx in 0..current_len {
+        let existing = &leaderboard.entries[idx];
+        let candidate_key = (candidate.victory as u8, candidate.score, candidate.hp_tenths);
+        let existing_key = (existing.victory as u8, existing.score, existing.hp_tenths);
+        if candidate_key > existing_key {
+            insert_idx = Some(idx);
+            break;
+        }
+    }
+
+    if insert_idx.is_none() && current_len < LEADERBOARD_SIZE {
+        insert_idx = Some(current_len);
+    }
+
+    if let Some(pos) = insert_idx {
+        let new_len = (current_len + 1).min(LEADERBOARD_SIZE);
+        for shift in (pos + 1..new_len).rev() {
+            leaderboard.entries[shift] = leaderboard.entries[shift - 1];
+        }
+        leaderboard.entries[pos] = candidate;
+        leaderboard.entry_count = new_len as u8;
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CardCategory {
@@ -76,6 +337,18 @@ pub fn shuffle_deck_from_vrf(randomness: &[u8; 32]) -> [u8; DECK_SIZE] {
         deck.swap(i, j);
     }
     deck
+}
+
+fn is_authorized_vrf_callback_signer(signer: &Pubkey, _run: &DungeonRun) -> bool {
+    let is_vrf_oracle = *signer == ephemeral_vrf_sdk::consts::VRF_PROGRAM_IDENTITY
+        || *signer == ephemeral_vrf_sdk::consts::scoped_vrf_identity(&crate::ID);
+    #[cfg(feature = "localnet-vrf-fallback")]
+    {
+        if is_vrf_oracle || *signer == _run.player || *signer == _run.session_signer {
+            return true;
+        }
+    }
+    is_vrf_oracle
 }
 
 fn next_vrf_combat_roll(run: &mut DungeonRun, slot: u64) -> u64 {
@@ -160,10 +433,21 @@ pub mod scoundrel {
             )?;
         }
 
+        let player_key = ctx.accounts.player.key();
         let dungeon_run_key = ctx.accounts.dungeon_run.key();
-        let run = &mut ctx.accounts.dungeon_run;
 
-        run.player = ctx.accounts.player.key();
+        let profile = &mut ctx.accounts.player_profile;
+        sync_profile_identity(
+            profile,
+            player_key,
+            ctx.bumps.player_profile,
+            &[0u8; 32],
+        );
+        profile.runs_started = profile.runs_started.saturating_add(1);
+        profile.total_vrf_requests = profile.total_vrf_requests.saturating_add(1);
+
+        let run = &mut ctx.accounts.dungeon_run;
+        run.player = player_key;
         run.session_signer = ctx.accounts.session_signer.key();
         run.bump = ctx.bumps.dungeon_run;
 
@@ -201,7 +485,7 @@ pub mod scoundrel {
         run.rusty_shield_buff_rooms_left = 0;
 
         let ix = create_request_randomness_ix(RequestRandomnessParams {
-            payer: ctx.accounts.player.key(),
+            payer: player_key,
             oracle_queue: ctx.accounts.oracle_queue.key(),
             callback_program_id: ID,
             callback_discriminator: instruction::CallbackStartRun::DISCRIMINATOR.to_vec(),
@@ -214,11 +498,47 @@ pub mod scoundrel {
             ..Default::default()
         });
 
-        if ctx.accounts.vrf_program.executable && !ctx.accounts.oracle_queue.data_is_empty() {
+        #[cfg(feature = "localnet-vrf-fallback")]
+        {
+            if ctx.accounts.vrf_program.executable && !ctx.accounts.oracle_queue.data_is_empty() {
+                ctx.accounts
+                    .invoke_signed_vrf(&ctx.accounts.player.to_account_info(), &ix)?;
+            } else {
+                msg!("VRF oracle queue uninitialized on local validator; awaiting callback_start_run");
+            }
+        }
+        #[cfg(not(feature = "localnet-vrf-fallback"))]
+        {
             ctx.accounts
                 .invoke_signed_vrf(&ctx.accounts.player.to_account_info(), &ix)?;
-        } else {
-            msg!("VRF oracle queue uninitialized on local validator; awaiting callback_start_run");
+        }
+
+        Ok(())
+    }
+
+    /// Initializes the canonical SPL Gold Mint + Player ATA (if needed) and approves a bounded
+    /// SPL Token delegate allowance for `dungeon_run.session_signer` so Merchant burns work popup-free.
+    pub fn prepare_session_vault(
+        ctx: Context<PrepareSessionVault>,
+        allowance: u64,
+    ) -> Result<()> {
+        ensure_gold_mint_and_ata(
+            &ctx.accounts.player.to_account_info(),
+            &ctx.accounts.player.to_account_info(),
+            &ctx.accounts.gold_mint.to_account_info(),
+            ctx.bumps.gold_mint,
+            &ctx.accounts.player_gold_ata.to_account_info(),
+            &ctx.accounts.token_program.to_account_info(),
+            &ctx.accounts.system_program.to_account_info(),
+        )?;
+
+        if ctx.accounts.session_signer.key() != ctx.accounts.player.key() && allowance > 0 {
+            approve_session_delegate(
+                &ctx.accounts.player.to_account_info(),
+                &ctx.accounts.player_gold_ata.to_account_info(),
+                &ctx.accounts.session_signer.to_account_info(),
+                allowance,
+            )?;
         }
 
         Ok(())
@@ -228,6 +548,7 @@ pub mod scoundrel {
         ctx: Context<CallbackStartRun>,
         randomness: [u8; 32],
     ) -> Result<()> {
+        let dungeon_run_key = ctx.accounts.dungeon_run.key();
         let run = &mut ctx.accounts.dungeon_run;
         require!(
             run.run_status == RUN_STATUS_AWAITING_VRF,
@@ -241,40 +562,122 @@ pub mod scoundrel {
         run.deck_len = DECK_SIZE as u8;
         run.room = [None; ROOM_SIZE];
 
-        for slot in 0..ROOM_SIZE {
-            run.room[slot] = draw_card(run);
+        let mut initial_room = [255u8; ROOM_SIZE];
+        for (slot, card_out) in initial_room.iter_mut().enumerate() {
+            let drawn = draw_card(run);
+            run.room[slot] = drawn;
+            if let Some(c) = drawn {
+                *card_out = c;
+            }
         }
 
         run.run_status = RUN_STATUS_ACTIVE;
+
+        emit!(VrfRunStarted {
+            player: run.player,
+            dungeon_run: dungeon_run_key,
+            vrf_seed: randomness,
+            initial_room,
+        });
+
         Ok(())
     }
 
-    pub fn buy_item(ctx: Context<PlayerTurn>, item_id: u8) -> Result<()> {
+    pub fn buy_item(ctx: Context<BuyItem>, item_id: u8) -> Result<()> {
         let run = &mut ctx.accounts.dungeon_run;
         require!(
             run.run_status == RUN_STATUS_ACTIVE,
             ScoundrelError::RunNotActive
         );
 
+        let price = item_price(item_id)?;
+        let expected_ata = expected_gold_ata(&ctx.accounts.player.key(), &ctx.accounts.gold_mint.key());
+        require_keys_eq!(
+            ctx.accounts.player_gold_ata.key(),
+            expected_ata,
+            ScoundrelError::InvalidPlayerGoldAta
+        );
+
+        let paid_unclaimed = run.unclaimed_gold.min(price);
+        let deficit_spl = (price - paid_unclaimed) as u64;
+
+        if deficit_spl > 0 {
+            require!(
+                !ctx.accounts.gold_mint.data_is_empty()
+                    && *ctx.accounts.gold_mint.owner == SPL_TOKEN_PROGRAM_ID,
+                ScoundrelError::InsufficientGold
+            );
+
+            let (ata_balance, delegate_opt, delegated_amount) = read_validated_token_account(
+                &ctx.accounts.player_gold_ata.to_account_info(),
+                &ctx.accounts.gold_mint.key(),
+                &ctx.accounts.player.key(),
+            )?;
+            require!(ata_balance >= deficit_spl, ScoundrelError::InsufficientGold);
+
+            // Enforce dual-layer authority: session key also requires bounded SPL Token delegate approval.
+            if ctx.accounts.signer.key() != ctx.accounts.player.key() {
+                let approved = delegate_opt == Some(ctx.accounts.signer.key())
+                    && delegated_amount >= deficit_spl;
+                require!(approved, ScoundrelError::MissingTokenDelegateApproval);
+            }
+        }
+
+        // Checks-Effects-Interactions: mutate run + profile state prior to SPL Token Burn CPI
+        run.unclaimed_gold = run.unclaimed_gold.saturating_sub(paid_unclaimed);
         match item_id {
             ITEM_OFE_CHARM => {
-                require!(
-                    run.unclaimed_gold >= PRICE_OFE_CHARM,
-                    ScoundrelError::InsufficientGold
-                );
-                run.unclaimed_gold = run.unclaimed_gold.saturating_sub(PRICE_OFE_CHARM);
                 run.ofe_inventory = run.ofe_inventory.saturating_add(1);
             }
             ITEM_RUSTY_SHIELD => {
-                require!(
-                    run.unclaimed_gold >= PRICE_RUSTY_SHIELD,
-                    ScoundrelError::InsufficientGold
-                );
-                run.unclaimed_gold = run.unclaimed_gold.saturating_sub(PRICE_RUSTY_SHIELD);
                 run.rusty_shield_inventory = run.rusty_shield_inventory.saturating_add(1);
+            }
+            ITEM_EPIC_POTION => {
+                run.epic_potions_inventory = run.epic_potions_inventory.saturating_add(1);
             }
             _ => return err!(ScoundrelError::InvalidMarketplaceItem),
         }
+
+        let profile = &mut ctx.accounts.player_profile;
+        sync_profile_identity(
+            profile,
+            ctx.accounts.player.key(),
+            ctx.bumps.player_profile,
+            &run.vrf_seed,
+        );
+        profile.total_gold_spent = profile.total_gold_spent.saturating_add(price as u64);
+
+        if deficit_spl > 0 {
+            // SPL Token Burn (tag = 8, amount: u64 LE)
+            let mut burn_data = Vec::with_capacity(9);
+            burn_data.push(8u8);
+            burn_data.extend_from_slice(&deficit_spl.to_le_bytes());
+
+            let burn_ix = Instruction {
+                program_id: SPL_TOKEN_PROGRAM_ID,
+                accounts: vec![
+                    AccountMeta::new(ctx.accounts.player_gold_ata.key(), false),
+                    AccountMeta::new(ctx.accounts.gold_mint.key(), false),
+                    AccountMeta::new_readonly(ctx.accounts.signer.key(), true),
+                ],
+                data: burn_data,
+            };
+            invoke(
+                &burn_ix,
+                &[
+                    ctx.accounts.player_gold_ata.to_account_info(),
+                    ctx.accounts.gold_mint.to_account_info(),
+                    ctx.accounts.signer.to_account_info(),
+                ],
+            )?;
+        }
+
+        emit!(MarketplaceItemPurchased {
+            player: ctx.accounts.player.key(),
+            item_id,
+            paid_unclaimed_gold: paid_unclaimed,
+            burned_spl_gold: deficit_spl,
+        });
 
         Ok(())
     }
@@ -310,6 +713,18 @@ pub mod scoundrel {
                 );
                 run.rusty_shield_inventory -= 1;
                 run.rusty_shield_buff_rooms_left = 3;
+            }
+            ITEM_EPIC_POTION => {
+                require!(
+                    run.epic_potions_inventory > 0,
+                    ScoundrelError::NoEpicPotionsAvailable
+                );
+                require!(
+                    run.epic_potion_buff_rooms_left == 0,
+                    ScoundrelError::EpicPotionAlreadyActive
+                );
+                run.epic_potions_inventory -= 1;
+                run.epic_potion_buff_rooms_left = 3;
             }
             _ => return err!(ScoundrelError::InvalidMarketplaceItem),
         }
@@ -371,7 +786,7 @@ pub mod scoundrel {
     }
 
     pub fn resolve_card(
-        ctx: Context<PlayerTurn>,
+        ctx: Context<ResolveCard>,
         slot_index: u8,
         use_weapon: bool,
     ) -> Result<()> {
@@ -389,6 +804,15 @@ pub mod scoundrel {
             (slot_index as usize) < ROOM_SIZE,
             ScoundrelError::InvalidSlotIndex
         );
+
+        let profile = &mut ctx.accounts.player_profile;
+        sync_profile_identity(
+            profile,
+            ctx.accounts.player.key(),
+            ctx.bumps.player_profile,
+            &run.vrf_seed,
+        );
+        let prev_nonce = run.combat_rng_nonce;
 
         let slot = slot_index as usize;
         let card_id = run.room[slot].take().ok_or(ScoundrelError::EmptyRoomSlot)?;
@@ -470,12 +894,33 @@ pub mod scoundrel {
                     }
                 }
 
+                let rolls_used = run.combat_rng_nonce.saturating_sub(prev_nonce);
+                profile.total_vrf_combat_rolls =
+                    profile.total_vrf_combat_rolls.saturating_add(rolls_used);
+
                 run.hp_tenths = run.hp_tenths.saturating_sub(damage_tenths);
                 if run.hp_tenths == 0 {
                     run.run_status = RUN_STATUS_DEFEAT;
                     run.score = compute_defeat_score(run)?;
+                    record_run_completion(
+                        profile,
+                        &mut ctx.accounts.leaderboard,
+                        ctx.bumps.leaderboard,
+                        run,
+                        false,
+                        clock.unix_timestamp,
+                    );
+                    emit!(RunCompleted {
+                        player: run.player,
+                        victory: false,
+                        score: run.score,
+                        hp_tenths: 0,
+                        vrf_seed: run.vrf_seed,
+                    });
                     return Ok(());
                 }
+
+                profile.monsters_slain = profile.monsters_slain.saturating_add(1);
             }
             CardCategory::Weapon => {
                 run.equipped_weapon_rank = card_rank;
@@ -528,6 +973,21 @@ pub mod scoundrel {
                         0
                     };
                 run.score = base_score + potion_bonus;
+                record_run_completion(
+                    profile,
+                    &mut ctx.accounts.leaderboard,
+                    ctx.bumps.leaderboard,
+                    run,
+                    true,
+                    clock.unix_timestamp,
+                );
+                emit!(RunCompleted {
+                    player: run.player,
+                    victory: true,
+                    score: run.score,
+                    hp_tenths: run.hp_tenths,
+                    vrf_seed: run.vrf_seed,
+                });
             } else {
                 run.pending_spoils_threat = run.room_threat_accumulator.max(1);
                 run.room_threat_accumulator = 0;
@@ -540,7 +1000,7 @@ pub mod scoundrel {
         Ok(())
     }
 
-    pub fn claim_spoils(ctx: Context<PlayerTurn>, choice: u8) -> Result<()> {
+    pub fn claim_spoils(ctx: Context<ClaimSpoils>, choice: u8) -> Result<()> {
         let run = &mut ctx.accounts.dungeon_run;
         require!(
             run.run_status == RUN_STATUS_ACTIVE,
@@ -549,12 +1009,16 @@ pub mod scoundrel {
         let threat = run.pending_spoils_threat;
         require!(threat > 0, ScoundrelError::NoSpoilsToClaim);
 
+        let mut gold_earned: u32 = 0;
+
         if threat < 12 {
             require!(choice == 0, ScoundrelError::InvalidSpoilsChoice);
+            gold_earned = 15;
             run.unclaimed_gold = run.unclaimed_gold.saturating_add(15);
         } else if threat <= 24 {
             match choice {
                 0 => {
+                    gold_earned = 40;
                     run.unclaimed_gold = run.unclaimed_gold.saturating_add(40);
                 }
                 1 => {
@@ -565,9 +1029,11 @@ pub mod scoundrel {
         } else {
             match choice {
                 0 => {
+                    gold_earned = 85;
                     run.unclaimed_gold = run.unclaimed_gold.saturating_add(85);
                 }
                 1 => {
+                    gold_earned = 25;
                     run.epic_potions_inventory = run.epic_potions_inventory.saturating_add(1);
                     run.unclaimed_gold = run.unclaimed_gold.saturating_add(25);
                 }
@@ -597,6 +1063,15 @@ pub mod scoundrel {
             }
         }
 
+        let profile = &mut ctx.accounts.player_profile;
+        sync_profile_identity(
+            profile,
+            ctx.accounts.player.key(),
+            ctx.bumps.player_profile,
+            &run.vrf_seed,
+        );
+        profile.total_gold_earned = profile.total_gold_earned.saturating_add(gold_earned as u64);
+
         Ok(())
     }
 
@@ -604,92 +1079,31 @@ pub mod scoundrel {
         let amount = ctx.accounts.dungeon_run.unclaimed_gold as u64;
         require!(amount > 0, ScoundrelError::NoGoldToClaim);
 
-        let (expected_ata, _) = Pubkey::find_program_address(
-            &[
-                ctx.accounts.player.key().as_ref(),
-                SPL_TOKEN_PROGRAM_ID.as_ref(),
-                ctx.accounts.gold_mint.key().as_ref(),
-            ],
-            &ASSOCIATED_TOKEN_PROGRAM_ID,
-        );
-        require_keys_eq!(
-            ctx.accounts.player_gold_ata.key(),
-            expected_ata,
-            ScoundrelError::InvalidPlayerGoldAta
-        );
+        ensure_gold_mint_and_ata(
+            &ctx.accounts.payer.to_account_info(),
+            &ctx.accounts.player.to_account_info(),
+            &ctx.accounts.gold_mint.to_account_info(),
+            ctx.bumps.gold_mint,
+            &ctx.accounts.player_gold_ata.to_account_info(),
+            &ctx.accounts.token_program.to_account_info(),
+            &ctx.accounts.system_program.to_account_info(),
+        )?;
 
         let mint_bump = ctx.bumps.gold_mint;
         let mint_seeds: &[&[u8]] = &[GOLD_MINT_SEED, &[mint_bump]];
 
-        if ctx.accounts.gold_mint.data_is_empty() {
-            let rent_lamports = Rent::get()?.minimum_balance(SPL_MINT_LEN);
-            anchor_lang::system_program::create_account(
-                CpiContext::new_with_signer(
-                    ctx.accounts.system_program.key(),
-                    anchor_lang::system_program::CreateAccount {
-                        from: ctx.accounts.payer.to_account_info(),
-                        to: ctx.accounts.gold_mint.to_account_info(),
-                    },
-                    &[mint_seeds],
-                ),
-                rent_lamports,
-                SPL_MINT_LEN as u64,
-                &SPL_TOKEN_PROGRAM_ID,
-            )?;
-
-            // SPL Token InitializeMint2 (tag = 20, decimals = 0, mint_authority = gold_mint, freeze_authority = None)
-            let mut init_mint_data = Vec::with_capacity(35);
-            init_mint_data.push(20u8);
-            init_mint_data.push(SPL_GOLD_DECIMALS);
-            init_mint_data.extend_from_slice(ctx.accounts.gold_mint.key().as_ref());
-            init_mint_data.push(0u8);
-
-            let init_mint_ix = Instruction {
-                program_id: SPL_TOKEN_PROGRAM_ID,
-                accounts: vec![AccountMeta::new(ctx.accounts.gold_mint.key(), false)],
-                data: init_mint_data,
-            };
-            invoke(
-                &init_mint_ix,
-                &[ctx.accounts.gold_mint.to_account_info()],
-            )?;
-        } else {
-            require_keys_eq!(
-                *ctx.accounts.gold_mint.owner,
-                SPL_TOKEN_PROGRAM_ID,
-                ScoundrelError::InvalidTokenProgram
-            );
-        }
-
-        if ctx.accounts.player_gold_ata.data_is_empty() {
-            // Associated Token Account CreateIdempotent (discriminator = 1u8)
-            let create_ata_ix = Instruction {
-                program_id: ASSOCIATED_TOKEN_PROGRAM_ID,
-                accounts: vec![
-                    AccountMeta::new(ctx.accounts.payer.key(), true),
-                    AccountMeta::new(ctx.accounts.player_gold_ata.key(), false),
-                    AccountMeta::new_readonly(ctx.accounts.player.key(), false),
-                    AccountMeta::new_readonly(ctx.accounts.gold_mint.key(), false),
-                    AccountMeta::new_readonly(ctx.accounts.system_program.key(), false),
-                    AccountMeta::new_readonly(SPL_TOKEN_PROGRAM_ID, false),
-                ],
-                data: vec![1u8],
-            };
-            invoke(
-                &create_ata_ix,
-                &[
-                    ctx.accounts.payer.to_account_info(),
-                    ctx.accounts.player_gold_ata.to_account_info(),
-                    ctx.accounts.player.to_account_info(),
-                    ctx.accounts.gold_mint.to_account_info(),
-                    ctx.accounts.system_program.to_account_info(),
-                    ctx.accounts.token_program.to_account_info(),
-                ],
-            )?;
-        }
-
-        // Checks-Effects-Interactions: clear unclaimed_gold before MintTo CPI
+        // Checks-Effects-Interactions: clear unclaimed_gold & update profile before MintTo CPI
+        let vrf_seed = ctx.accounts.dungeon_run.vrf_seed;
         ctx.accounts.dungeon_run.unclaimed_gold = 0;
+
+        let profile = &mut ctx.accounts.player_profile;
+        sync_profile_identity(
+            profile,
+            ctx.accounts.player.key(),
+            ctx.bumps.player_profile,
+            &vrf_seed,
+        );
+        profile.total_gold_minted = profile.total_gold_minted.saturating_add(amount);
 
         let mut mint_to_data = Vec::with_capacity(9);
         mint_to_data.push(7u8);
@@ -712,6 +1126,28 @@ pub mod scoundrel {
             ],
             &[mint_seeds],
         )?;
+
+        // When the wallet owner signs directly, also top up the session delegate's bounded allowance.
+        if ctx.accounts.payer.key() == ctx.accounts.player.key()
+            && ctx.accounts.session_signer.key() != ctx.accounts.player.key()
+        {
+            let (_, existing_delegate, existing_allowance) = read_validated_token_account(
+                &ctx.accounts.player_gold_ata.to_account_info(),
+                &ctx.accounts.gold_mint.key(),
+                &ctx.accounts.player.key(),
+            )?;
+            let base = if existing_delegate == Some(ctx.accounts.session_signer.key()) {
+                existing_allowance
+            } else {
+                0
+            };
+            approve_session_delegate(
+                &ctx.accounts.payer.to_account_info(),
+                &ctx.accounts.player_gold_ata.to_account_info(),
+                &ctx.accounts.session_signer.to_account_info(),
+                base.saturating_add(amount),
+            )?;
+        }
 
         emit!(GoldTokensMinted {
             player: ctx.accounts.player.key(),
@@ -745,7 +1181,16 @@ pub struct StartRun<'info> {
         seeds = [b"dungeon_run", player.key().as_ref()],
         bump
     )]
-    pub dungeon_run: Account<'info, DungeonRun>,
+    pub dungeon_run: Box<Account<'info, DungeonRun>>,
+
+    #[account(
+        init_if_needed,
+        payer = player,
+        space = 8 + PlayerProfile::INIT_SPACE,
+        seeds = [PROFILE_SEED, player.key().as_ref()],
+        bump
+    )]
+    pub player_profile: Box<Account<'info, PlayerProfile>>,
 
     /// CHECK: MagicBlock VRF oracle queue
     #[account(
@@ -764,18 +1209,56 @@ pub struct StartRun<'info> {
 }
 
 #[derive(Accounts)]
+pub struct PrepareSessionVault<'info> {
+    #[account(mut)]
+    pub player: Signer<'info>,
+
+    /// CHECK: Verified against `dungeon_run.session_signer`.
+    #[account(
+        constraint = session_signer.key() == dungeon_run.session_signer @ ScoundrelError::UnauthorizedSigner
+    )]
+    pub session_signer: UncheckedAccount<'info>,
+
+    #[account(
+        seeds = [b"dungeon_run", player.key().as_ref()],
+        bump = dungeon_run.bump,
+        constraint = dungeon_run.player == player.key() @ ScoundrelError::UnauthorizedSigner
+    )]
+    pub dungeon_run: Box<Account<'info, DungeonRun>>,
+
+    /// CHECK: Canonical SPL Gold Mint PDA (`seeds = [b"scoundrel_gold_mint"]`).
+    #[account(
+        mut,
+        seeds = [GOLD_MINT_SEED],
+        bump
+    )]
+    pub gold_mint: UncheckedAccount<'info>,
+
+    /// CHECK: Canonical Associated Token Account for `player` and `gold_mint`.
+    #[account(mut)]
+    pub player_gold_ata: UncheckedAccount<'info>,
+
+    /// CHECK: SPL Token program (`TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`)
+    #[account(address = SPL_TOKEN_PROGRAM_ID @ ScoundrelError::InvalidTokenProgram)]
+    pub token_program: UncheckedAccount<'info>,
+
+    /// CHECK: SPL Associated Token Account program (`ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL`)
+    #[account(address = ASSOCIATED_TOKEN_PROGRAM_ID @ ScoundrelError::InvalidAssociatedTokenProgram)]
+    pub associated_token_program: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
 pub struct CallbackStartRun<'info> {
     #[account(
-        constraint = vrf_program_identity.key() == ephemeral_vrf_sdk::consts::VRF_PROGRAM_IDENTITY
-            || vrf_program_identity.key() == ephemeral_vrf_sdk::consts::scoped_vrf_identity(&crate::ID)
-            || vrf_program_identity.key() == dungeon_run.player
-            || vrf_program_identity.key() == dungeon_run.session_signer
+        constraint = is_authorized_vrf_callback_signer(&vrf_program_identity.key(), &dungeon_run)
             @ ScoundrelError::UnauthorizedVrfCallback
     )]
     pub vrf_program_identity: Signer<'info>,
 
     #[account(mut)]
-    pub dungeon_run: Account<'info, DungeonRun>,
+    pub dungeon_run: Box<Account<'info, DungeonRun>>,
 }
 
 #[derive(Accounts)]
@@ -788,7 +1271,131 @@ pub struct PlayerTurn<'info> {
         bump = dungeon_run.bump,
         constraint = signer.key() == dungeon_run.player || signer.key() == dungeon_run.session_signer @ ScoundrelError::UnauthorizedSigner
     )]
-    pub dungeon_run: Account<'info, DungeonRun>,
+    pub dungeon_run: Box<Account<'info, DungeonRun>>,
+}
+
+#[derive(Accounts)]
+pub struct ResolveCard<'info> {
+    #[account(
+        mut,
+        constraint = signer.key() == dungeon_run.player || signer.key() == dungeon_run.session_signer @ ScoundrelError::UnauthorizedSigner
+    )]
+    pub signer: Signer<'info>,
+
+    /// CHECK: Verified against `dungeon_run.player`.
+    #[account(
+        constraint = player.key() == dungeon_run.player @ ScoundrelError::UnauthorizedSigner
+    )]
+    pub player: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"dungeon_run", dungeon_run.player.as_ref()],
+        bump = dungeon_run.bump
+    )]
+    pub dungeon_run: Box<Account<'info, DungeonRun>>,
+
+    #[account(
+        init_if_needed,
+        payer = signer,
+        space = 8 + PlayerProfile::INIT_SPACE,
+        seeds = [PROFILE_SEED, player.key().as_ref()],
+        bump
+    )]
+    pub player_profile: Box<Account<'info, PlayerProfile>>,
+
+    #[account(
+        init_if_needed,
+        payer = signer,
+        space = 8 + Leaderboard::INIT_SPACE,
+        seeds = [LEADERBOARD_SEED],
+        bump
+    )]
+    pub leaderboard: Box<Account<'info, Leaderboard>>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct ClaimSpoils<'info> {
+    #[account(
+        mut,
+        constraint = signer.key() == dungeon_run.player || signer.key() == dungeon_run.session_signer @ ScoundrelError::UnauthorizedSigner
+    )]
+    pub signer: Signer<'info>,
+
+    /// CHECK: Verified against `dungeon_run.player`.
+    #[account(
+        constraint = player.key() == dungeon_run.player @ ScoundrelError::UnauthorizedSigner
+    )]
+    pub player: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"dungeon_run", dungeon_run.player.as_ref()],
+        bump = dungeon_run.bump
+    )]
+    pub dungeon_run: Box<Account<'info, DungeonRun>>,
+
+    #[account(
+        init_if_needed,
+        payer = signer,
+        space = 8 + PlayerProfile::INIT_SPACE,
+        seeds = [PROFILE_SEED, player.key().as_ref()],
+        bump
+    )]
+    pub player_profile: Box<Account<'info, PlayerProfile>>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct BuyItem<'info> {
+    #[account(
+        mut,
+        constraint = signer.key() == dungeon_run.player || signer.key() == dungeon_run.session_signer @ ScoundrelError::UnauthorizedSigner
+    )]
+    pub signer: Signer<'info>,
+
+    /// CHECK: Verified against `dungeon_run.player`.
+    #[account(
+        constraint = player.key() == dungeon_run.player @ ScoundrelError::UnauthorizedSigner
+    )]
+    pub player: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"dungeon_run", dungeon_run.player.as_ref()],
+        bump = dungeon_run.bump
+    )]
+    pub dungeon_run: Box<Account<'info, DungeonRun>>,
+
+    #[account(
+        init_if_needed,
+        payer = signer,
+        space = 8 + PlayerProfile::INIT_SPACE,
+        seeds = [PROFILE_SEED, player.key().as_ref()],
+        bump
+    )]
+    pub player_profile: Box<Account<'info, PlayerProfile>>,
+
+    /// CHECK: Canonical SPL Gold Mint PDA (`seeds = [b"scoundrel_gold_mint"]`).
+    #[account(
+        mut,
+        seeds = [GOLD_MINT_SEED],
+        bump
+    )]
+    pub gold_mint: UncheckedAccount<'info>,
+
+    /// CHECK: Canonical Player Gold ATA verified by PDA derivation.
+    #[account(mut)]
+    pub player_gold_ata: UncheckedAccount<'info>,
+
+    /// CHECK: SPL Token program (`TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`)
+    #[account(address = SPL_TOKEN_PROGRAM_ID @ ScoundrelError::InvalidTokenProgram)]
+    pub token_program: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
@@ -805,12 +1412,27 @@ pub struct ClaimGoldTokens<'info> {
     )]
     pub player: UncheckedAccount<'info>,
 
+    /// CHECK: Verified against `dungeon_run.session_signer`.
+    #[account(
+        constraint = session_signer.key() == dungeon_run.session_signer @ ScoundrelError::UnauthorizedSigner
+    )]
+    pub session_signer: UncheckedAccount<'info>,
+
     #[account(
         mut,
         seeds = [b"dungeon_run", dungeon_run.player.as_ref()],
         bump = dungeon_run.bump
     )]
-    pub dungeon_run: Account<'info, DungeonRun>,
+    pub dungeon_run: Box<Account<'info, DungeonRun>>,
+
+    #[account(
+        init_if_needed,
+        payer = payer,
+        space = 8 + PlayerProfile::INIT_SPACE,
+        seeds = [PROFILE_SEED, player.key().as_ref()],
+        bump
+    )]
+    pub player_profile: Box<Account<'info, PlayerProfile>>,
 
     /// CHECK: Canonical SPL Gold Mint PDA (`seeds = [b"scoundrel_gold_mint"]`), initialized on first claim and used as its own mint authority.
     #[account(
@@ -847,7 +1469,7 @@ pub struct CloseRun<'info> {
         bump = dungeon_run.bump,
         constraint = dungeon_run.player == player.key() @ ScoundrelError::UnauthorizedSigner
     )]
-    pub dungeon_run: Account<'info, DungeonRun>,
+    pub dungeon_run: Box<Account<'info, DungeonRun>>,
 }
 
 #[account]
@@ -883,6 +1505,69 @@ pub struct DungeonRun {
     pub ofe_buff_rooms_left: u8,
     pub rusty_shield_inventory: u8,
     pub rusty_shield_buff_rooms_left: u8,
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct PlayerProfile {
+    pub player: Pubkey,
+    pub bump: u8,
+    pub has_completed_run: bool,
+    pub runs_started: u32,
+    pub victories: u32,
+    pub defeats: u32,
+    pub best_score: i32,
+    pub monsters_slain: u32,
+    pub total_gold_earned: u64,
+    pub total_gold_minted: u64,
+    pub total_gold_spent: u64,
+    pub total_vrf_requests: u32,
+    pub total_vrf_combat_rolls: u64,
+    pub last_vrf_seed: [u8; 32],
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Default, InitSpace)]
+pub struct LeaderboardEntry {
+    pub player: Pubkey,
+    pub score: i32,
+    pub hp_tenths: u16,
+    pub victory: bool,
+    pub vrf_seed_prefix: [u8; 8],
+    pub timestamp: i64,
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct Leaderboard {
+    pub bump: u8,
+    pub entry_count: u8,
+    pub total_runs_completed: u64,
+    pub entries: [LeaderboardEntry; 10],
+}
+
+#[event]
+pub struct VrfRunStarted {
+    pub player: Pubkey,
+    pub dungeon_run: Pubkey,
+    pub vrf_seed: [u8; 32],
+    pub initial_room: [u8; 4],
+}
+
+#[event]
+pub struct MarketplaceItemPurchased {
+    pub player: Pubkey,
+    pub item_id: u8,
+    pub paid_unclaimed_gold: u32,
+    pub burned_spl_gold: u64,
+}
+
+#[event]
+pub struct RunCompleted {
+    pub player: Pubkey,
+    pub victory: bool,
+    pub score: i32,
+    pub hp_tenths: u16,
+    pub vrf_seed: [u8; 32],
 }
 
 #[event]
@@ -942,7 +1627,7 @@ pub enum ScoundrelError {
     EpicPotionAlreadyActive,
     #[msg("Invalid marketplace item ID.")]
     InvalidMarketplaceItem,
-    #[msg("Insufficient unclaimed gold for marketplace purchase.")]
+    #[msg("Insufficient unclaimed + SPL Gold balance for marketplace purchase.")]
     InsufficientGold,
     #[msg("No marketplace item of this type available in inventory.")]
     NoMarketplaceItemAvailable,
@@ -968,4 +1653,6 @@ pub enum ScoundrelError {
     InvalidTokenProgram,
     #[msg("Invalid SPL Associated Token Account program address.")]
     InvalidAssociatedTokenProgram,
+    #[msg("Session key lacks bounded SPL Token delegate approval for burning minted gold.")]
+    MissingTokenDelegateApproval,
 }

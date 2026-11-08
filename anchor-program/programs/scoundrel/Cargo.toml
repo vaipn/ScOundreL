@@ -11,6 +11,7 @@ name = "scoundrel"
 
 [features]
 default = []
+localnet-vrf-fallback = []
 cpi = ["no-entrypoint"]
 no-entrypoint = []
 no-log-ix-name = []

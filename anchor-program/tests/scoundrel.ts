@@ -108,12 +108,102 @@ describe("scoundrel", () => {
   const program = anchor.workspace.scoundrel as Program<Scoundrel>;
   const { Keypair, SystemProgram, PublicKey, Transaction, LAMPORTS_PER_SOL } = anchor.web3;
 
+  const SPL_TOKEN_PROGRAM_ID = new anchor.web3.PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+  const ASSOCIATED_TOKEN_PROGRAM_ID = new anchor.web3.PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+
   function deriveDungeonRunPda(playerPubkey: anchor.web3.PublicKey): anchor.web3.PublicKey {
     const [pda] = PublicKey.findProgramAddressSync(
       [Buffer.from("dungeon_run"), playerPubkey.toBuffer()],
       program.programId
     );
     return pda;
+  }
+
+  function derivePlayerProfilePda(playerPubkey: anchor.web3.PublicKey): anchor.web3.PublicKey {
+    const [pda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("profile"), playerPubkey.toBuffer()],
+      program.programId
+    );
+    return pda;
+  }
+
+  function deriveLeaderboardPda(): anchor.web3.PublicKey {
+    const [pda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("leaderboard")],
+      program.programId
+    );
+    return pda;
+  }
+
+  function deriveGoldMintAndAta(playerPubkey: anchor.web3.PublicKey): {
+    goldMint: anchor.web3.PublicKey;
+    playerGoldAta: anchor.web3.PublicKey;
+  } {
+    const [goldMint] = PublicKey.findProgramAddressSync(
+      [Buffer.from("scoundrel_gold_mint")],
+      program.programId
+    );
+    const [playerGoldAta] = PublicKey.findProgramAddressSync(
+      [playerPubkey.toBuffer(), SPL_TOKEN_PROGRAM_ID.toBuffer(), goldMint.toBuffer()],
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
+    return { goldMint, playerGoldAta };
+  }
+
+  async function resolveRoomCard(
+    playerPubkey: anchor.web3.PublicKey,
+    signer: anchor.web3.Keypair,
+    dungeonRun: anchor.web3.PublicKey,
+    slotIndex: number,
+    useWeapon: boolean
+  ): Promise<void> {
+    await program.methods
+      .resolveCard(slotIndex, useWeapon)
+      .accountsPartial({
+        signer: signer.publicKey,
+        player: playerPubkey,
+        dungeonRun,
+      })
+      .signers([signer])
+      .rpc();
+  }
+
+  async function claimRoomSpoils(
+    playerPubkey: anchor.web3.PublicKey,
+    signer: anchor.web3.Keypair,
+    dungeonRun: anchor.web3.PublicKey,
+    choice: number
+  ): Promise<void> {
+    await program.methods
+      .claimSpoils(choice)
+      .accountsPartial({
+        signer: signer.publicKey,
+        player: playerPubkey,
+        dungeonRun,
+      })
+      .signers([signer])
+      .rpc();
+  }
+
+  async function buyMerchantItem(
+    playerPubkey: anchor.web3.PublicKey,
+    signer: anchor.web3.Keypair,
+    dungeonRun: anchor.web3.PublicKey,
+    itemId: number
+  ): Promise<void> {
+    const { goldMint, playerGoldAta } = deriveGoldMintAndAta(playerPubkey);
+    await program.methods
+      .buyItem(itemId)
+      .accountsPartial({
+        signer: signer.publicKey,
+        player: playerPubkey,
+        dungeonRun,
+        goldMint,
+        playerGoldAta,
+        tokenProgram: SPL_TOKEN_PROGRAM_ID,
+      })
+      .signers([signer])
+      .rpc();
   }
 
   async function fundKeypairs(...keypairs: anchor.web3.Keypair[]): Promise<void> {
@@ -212,7 +302,13 @@ describe("scoundrel", () => {
       .rpc();
 
     const sessionBalance = await provider.connection.getBalance(sessionSigner.publicKey);
-    expect(sessionBalance).to.equal(5_000_000);
+    expect(sessionBalance).to.equal(10_000_000);
+
+    const profileAfterStart = await program.account.playerProfile.fetch(
+      derivePlayerProfilePda(player.publicKey)
+    );
+    expect(profileAfterStart.runsStarted).to.equal(1);
+    expect(profileAfterStart.totalVrfRequests).to.equal(1);
 
     const awaiting = await program.account.dungeonRun.fetch(dungeonRun);
     expect(awaiting.runStatus).to.equal(3); // RUN_STATUS_AWAITING_VRF
@@ -361,37 +457,25 @@ describe("scoundrel", () => {
       return [d[4], d[5], d[6]].some((c) => c.category === "monster" && c.rank > m1.rank);
     });
 
-    const { sessionSigner, dungeonRun, expectedDeck } = await startDeterministicRun(targetK);
+    const { player, sessionSigner, dungeonRun, expectedDeck } = await startDeterministicRun(targetK);
     const weapon = expectedDeck[0];
     const monster1 = expectedDeck[1];
     const monster2 = expectedDeck[2];
 
-    await program.methods
-      .resolveCard(0, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 0, false);
 
     let state = await program.account.dungeonRun.fetch(dungeonRun);
     expect(state.equippedWeaponRank).to.equal(weapon.rank);
     expect(state.weaponCeiling).to.equal(14);
 
-    await program.methods
-      .resolveCard(1, true)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 1, true);
 
     state = await program.account.dungeonRun.fetch(dungeonRun);
     const expectedChip1 = Math.max(0, monster1.rank - weapon.rank) * 10;
     expect(state.hpTenths).to.equal(200 - expectedChip1);
     expect(state.weaponCeiling).to.equal(monster1.rank);
 
-    await program.methods
-      .resolveCard(2, true)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 2, true);
 
     state = await program.account.dungeonRun.fetch(dungeonRun);
     const expectedChip2 = Math.max(0, monster2.rank - weapon.rank) * 10;
@@ -400,11 +484,7 @@ describe("scoundrel", () => {
     expect(state.weaponCeiling).to.equal(monster2.rank);
     expect(state.pendingSpoilsThreat).to.be.greaterThan(0);
 
-    await program.methods
-      .claimSpoils(0)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await claimRoomSpoils(player.publicKey, sessionSigner, dungeonRun, 0);
 
     state = await program.account.dungeonRun.fetch(dungeonRun);
     const higherSlot = state.room.findIndex(
@@ -415,22 +495,14 @@ describe("scoundrel", () => {
 
     let ceilingFailed = false;
     try {
-      await program.methods
-        .resolveCard(higherSlot, true)
-        .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-        .signers([sessionSigner])
-        .rpc();
+      await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, higherSlot, true);
     } catch (err: any) {
       ceilingFailed = true;
       expect(String(err)).to.include("WeaponCeilingExceeded");
     }
     expect(ceilingFailed).to.be.true;
 
-    await program.methods
-      .resolveCard(higherSlot, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, higherSlot, false);
 
     state = await program.account.dungeonRun.fetch(dungeonRun);
     expect(state.hpTenths).to.equal(Math.max(0, hpAfterRoom1 - higherMonster.rank * 10));
@@ -445,25 +517,17 @@ describe("scoundrel", () => {
       return d[0].rank > d[1].rank + 2;
     });
 
-    const { sessionSigner, dungeonRun, expectedDeck } = await startDeterministicRun(targetK);
+    const { player, sessionSigner, dungeonRun, expectedDeck } = await startDeterministicRun(targetK);
     const m = expectedDeck[0];
     const p1 = expectedDeck[1];
 
-    await program.methods
-      .resolveCard(0, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 0, false);
 
     let state = await program.account.dungeonRun.fetch(dungeonRun);
     const hpAfterMonster = 200 - m.rank * 10;
     expect(state.hpTenths).to.equal(hpAfterMonster);
 
-    await program.methods
-      .resolveCard(1, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 1, false);
 
     state = await program.account.dungeonRun.fetch(dungeonRun);
     const hpAfterFirstPotion = Math.min(200, hpAfterMonster + p1.rank * 10);
@@ -471,11 +535,7 @@ describe("scoundrel", () => {
     expect(state.potionUsedThisRoom).to.be.true;
     expect(state.firstPotionHealedTenths).to.equal(p1.rank * 10);
 
-    await program.methods
-      .resolveCard(2, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 2, false);
 
     state = await program.account.dungeonRun.fetch(dungeonRun);
     expect(state.hpTenths).to.equal(hpAfterFirstPotion);
@@ -579,33 +639,17 @@ describe("scoundrel", () => {
       return true;
     });
 
-    const { sessionSigner, dungeonRun, expectedDeck } = await startDeterministicRun(targetK);
+    const { player, sessionSigner, dungeonRun, expectedDeck } = await startDeterministicRun(targetK);
 
-    await program.methods
-      .resolveCard(0, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
-    await program.methods
-      .resolveCard(1, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
-    await program.methods
-      .resolveCard(2, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 0, false);
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 1, false);
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 2, false);
 
     let state = await program.account.dungeonRun.fetch(dungeonRun);
     expect(state.pendingSpoilsThreat).to.equal(expectedDeck[0].rank + 5);
     expect(state.pendingSpoilsThreat).to.be.within(12, 24);
 
-    await program.methods
-      .claimSpoils(1)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await claimRoomSpoils(player.publicKey, sessionSigner, dungeonRun, 1);
 
     state = await program.account.dungeonRun.fetch(dungeonRun);
     expect(state.epicPotionsInventory).to.equal(1);
@@ -620,43 +664,26 @@ describe("scoundrel", () => {
     expect(state.epicPotionsInventory).to.equal(0);
     expect(state.epicPotionBuffRoomsLeft).to.equal(3);
 
-    const r2Monster = expectedDeck[4];
     const r2Potion = expectedDeck[5];
     const echoPerRoom = r2Potion.rank;
 
-    await program.methods
-      .resolveCard(0, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 0, false);
 
     const hpBeforePotion = (await program.account.dungeonRun.fetch(dungeonRun)).hpTenths;
 
-    await program.methods
-      .resolveCard(1, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 1, false);
 
     const hpAfterDirectPotion = Math.min(200, hpBeforePotion + r2Potion.rank * 10);
     state = await program.account.dungeonRun.fetch(dungeonRun);
     expect(state.hpTenths).to.equal(hpAfterDirectPotion);
 
-    await program.methods
-      .resolveCard(2, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 2, false);
 
     state = await program.account.dungeonRun.fetch(dungeonRun);
     expect(state.hpTenths).to.equal(Math.min(200, hpAfterDirectPotion + echoPerRoom));
     expect(state.epicPotionBuffRoomsLeft).to.equal(2);
 
-    await program.methods
-      .claimSpoils(0)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await claimRoomSpoils(player.publicKey, sessionSigner, dungeonRun, 0);
 
     async function executePlannedNonPotionRoom(): Promise<{ hpBefore: number; damage: number; hpAfter: number }> {
       const s = await program.account.dungeonRun.fetch(dungeonRun);
@@ -668,11 +695,7 @@ describe("scoundrel", () => {
       );
       expect(plan).to.not.be.null;
       for (const step of plan!.steps) {
-        await program.methods
-          .resolveCard(step.slot, step.useWeapon)
-          .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-          .signers([sessionSigner])
-          .rpc();
+        await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, step.slot, step.useWeapon);
       }
       const after = (await program.account.dungeonRun.fetch(dungeonRun)).hpTenths;
       return { hpBefore: s.hpTenths, damage: plan!.damage, hpAfter: after };
@@ -683,11 +706,7 @@ describe("scoundrel", () => {
     expect(r3.hpAfter).to.equal(Math.min(200, r3.hpBefore - r3.damage + echoPerRoom));
     expect(state.epicPotionBuffRoomsLeft).to.equal(1);
 
-    await program.methods
-      .claimSpoils(0)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await claimRoomSpoils(player.publicKey, sessionSigner, dungeonRun, 0);
 
     const r4 = await executePlannedNonPotionRoom();
     state = await program.account.dungeonRun.fetch(dungeonRun);
@@ -706,27 +725,15 @@ describe("scoundrel", () => {
       return true;
     });
 
-    const { sessionSigner, dungeonRun, expectedDeck } = await startDeterministicRun(targetK);
+    const { player, sessionSigner, dungeonRun, expectedDeck } = await startDeterministicRun(targetK);
 
     let state = await program.account.dungeonRun.fetch(dungeonRun);
     expect(state.hasLegendarySkin).to.be.false;
     expect(state.legendaryForgedEdgeCharges).to.equal(0);
 
-    await program.methods
-      .resolveCard(0, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
-    await program.methods
-      .resolveCard(1, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
-    await program.methods
-      .resolveCard(2, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 0, false);
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 1, false);
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 2, false);
 
     state = await program.account.dungeonRun.fetch(dungeonRun);
     const expectedThreat = expectedDeck[0].rank + 5 + (expectedDeck[1].rank + 5);
@@ -735,22 +742,14 @@ describe("scoundrel", () => {
 
     let legendaryBlocked = false;
     try {
-      await program.methods
-        .claimSpoils(2)
-        .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-        .signers([sessionSigner])
-        .rpc();
+      await claimRoomSpoils(player.publicKey, sessionSigner, dungeonRun, 2);
     } catch (err: any) {
       legendaryBlocked = true;
       expect(String(err)).to.include("InvalidSpoilsChoice");
     }
     expect(legendaryBlocked).to.be.true;
 
-    await program.methods
-      .claimSpoils(1)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await claimRoomSpoils(player.publicKey, sessionSigner, dungeonRun, 1);
 
     state = await program.account.dungeonRun.fetch(dungeonRun);
     expect(state.epicPotionsInventory).to.equal(1);
@@ -758,22 +757,14 @@ describe("scoundrel", () => {
     expect(state.hasLegendarySkin).to.be.false;
     expect(state.legendaryForgedEdgeCharges).to.equal(0);
 
-    await program.methods
-      .resolveCard(0, true)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 0, true);
 
     state = await program.account.dungeonRun.fetch(dungeonRun);
     expect(state.weaponCeiling).to.equal(expectedDeck[4].rank);
 
     let ceilingRejected = false;
     try {
-      await program.methods
-        .resolveCard(1, true)
-        .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-        .signers([sessionSigner])
-        .rpc();
+      await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 1, true);
     } catch (err: any) {
       ceilingRejected = true;
       expect(String(err)).to.include("WeaponCeilingExceeded");
@@ -782,19 +773,14 @@ describe("scoundrel", () => {
   });
 
   it("6. Verifies Mini Marketplace (Ofe 60g & Rusty Shield 45g), 3-room buff countdown, and VRF combat rolls", async () => {
-    // Find a deck where:
-    // Room 1 (0..3): two monsters whose sum of ranks is 15..18 (High Threat >= 25), plus a Heart potion >= 8 to heal back up
-    // Room 2 (4..6): non-lethal cards (e.g. weapon/potion/low monster) so we can clear 3 rooms and test combat rolls
     const targetK = findTargetRngState((d) => {
       if (d[0].category !== "monster" || d[1].category !== "monster") return false;
       const sum1 = d[0].rank + d[1].rank;
       if (sum1 < 15 || sum1 > 17) return false;
       if (d[2].category !== "potion" || d[2].rank < 9) return false;
-      // Room 2 cards (4, 5, 6): slot 0 = monster (rank 4..8), slot 1 = monster (rank 4..8), slot 2 = weapon or potion
       if (d[4].category !== "monster" || d[4].rank < 4 || d[4].rank > 7) return false;
       if (d[5].category !== "monster" || d[5].rank < 4 || d[5].rank > 7) return false;
       if (d[6].category === "monster") return false;
-      // Room 3 cards (7, 8, 9): at least 2 non-monsters or low monsters so we can clear Room 3 & Room 4 easily
       const r3Monsters = [d[7], d[8], d[9]].filter((c) => c.category === "monster");
       if (r3Monsters.reduce((acc, c) => acc + c.rank, 0) > 10) return false;
       const r4Monsters = [d[10], d[11], d[12]].filter((c) => c.category === "monster");
@@ -802,41 +788,21 @@ describe("scoundrel", () => {
       return true;
     });
 
-    const { sessionSigner, dungeonRun } = await startDeterministicRun(targetK);
+    const { player, sessionSigner, dungeonRun } = await startDeterministicRun(targetK);
 
     // Clear Room 1 for High Threat Spoils (+85 Gold)
-    await program.methods
-      .resolveCard(0, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
-    await program.methods
-      .resolveCard(1, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
-    await program.methods
-      .resolveCard(2, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 0, false);
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 1, false);
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 2, false);
 
     // Claim +85 Gold (Choice 0)
-    await program.methods
-      .claimSpoils(0)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await claimRoomSpoils(player.publicKey, sessionSigner, dungeonRun, 0);
 
     let state = await program.account.dungeonRun.fetch(dungeonRun);
     expect(state.unclaimedGold).to.equal(85);
 
     // Buy Rusty Shield (item_id = 1, 45 Gold) -> 40 Gold remaining
-    await program.methods
-      .buyItem(1)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await buyMerchantItem(player.publicKey, sessionSigner, dungeonRun, 1);
 
     state = await program.account.dungeonRun.fetch(dungeonRun);
     expect(state.unclaimedGold).to.equal(40);
@@ -845,11 +811,7 @@ describe("scoundrel", () => {
     // Buying Ofe (60 Gold) with only 40 Gold must fail with InsufficientGold
     let insufficientFailed = false;
     try {
-      await program.methods
-        .buyItem(0)
-        .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-        .signers([sessionSigner])
-        .rpc();
+      await buyMerchantItem(player.publicKey, sessionSigner, dungeonRun, 0);
     } catch (err: any) {
       insufficientFailed = true;
       expect(String(err)).to.include("InsufficientGold");
@@ -868,42 +830,22 @@ describe("scoundrel", () => {
     expect(state.rustyShieldBuffRoomsLeft).to.equal(3);
 
     // Clear Room 2 (slots 0, 1, 2) -> fights two monsters barehanded with Rusty Shield active (increments combatRngNonce)
-    await program.methods
-      .resolveCard(0, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
-    await program.methods
-      .resolveCard(1, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
-    await program.methods
-      .resolveCard(2, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 0, false);
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 1, false);
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 2, false);
 
     state = await program.account.dungeonRun.fetch(dungeonRun);
-    expect(state.combatRngNonce.toNumber()).to.equal(2); // 2 Rusty Shield VRF rolls executed
-    expect(state.rustyShieldBuffRoomsLeft).to.equal(2); // Decremented 3 -> 2 at end of Room 2!
+    expect(state.combatRngNonce.toNumber()).to.equal(2);
+    expect(state.rustyShieldBuffRoomsLeft).to.equal(2);
 
     // Claim Room 2 Spoils (+40 Gold from Medium Threat) -> 40 + 40 = 80 Gold!
-    await program.methods
-      .claimSpoils(0)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await claimRoomSpoils(player.publicKey, sessionSigner, dungeonRun, 0);
 
     state = await program.account.dungeonRun.fetch(dungeonRun);
     expect(state.unclaimedGold).to.be.greaterThanOrEqual(60);
 
     // Now purchase Ofe Charm (item_id = 0, 60 Gold) and activate it (`ofeBuffRoomsLeft = 3`)
-    await program.methods
-      .buyItem(0)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await buyMerchantItem(player.publicKey, sessionSigner, dungeonRun, 0);
     await program.methods
       .useMarketplaceItem(0)
       .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
@@ -914,49 +856,21 @@ describe("scoundrel", () => {
     expect(state.ofeInventory).to.equal(0);
     expect(state.ofeBuffRoomsLeft).to.equal(3);
 
-    // Clear Room 3 (slots 0, 1, 2) -> verifies both Ofe (3 -> 2) and Rusty Shield (2 -> 1) tick down!
-    await program.methods
-      .resolveCard(0, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
-    await program.methods
-      .resolveCard(1, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
-    await program.methods
-      .resolveCard(2, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    // Clear Room 3 -> verifies both Ofe (3 -> 2) and Rusty Shield (2 -> 1) tick down!
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 0, false);
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 1, false);
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 2, false);
 
     state = await program.account.dungeonRun.fetch(dungeonRun);
     expect(state.ofeBuffRoomsLeft).to.equal(2);
     expect(state.rustyShieldBuffRoomsLeft).to.equal(1);
 
-    await program.methods
-      .claimSpoils(0)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await claimRoomSpoils(player.publicKey, sessionSigner, dungeonRun, 0);
 
-    // Clear Room 4 (slots 0, 1, 2) -> Ofe ticks 2 -> 1, Rusty Shield ticks 1 -> 0 (expires!)
-    await program.methods
-      .resolveCard(0, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
-    await program.methods
-      .resolveCard(1, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
-    await program.methods
-      .resolveCard(2, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    // Clear Room 4 -> Ofe ticks 2 -> 1, Rusty Shield ticks 1 -> 0 (expires!)
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 0, false);
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 1, false);
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 2, false);
 
     state = await program.account.dungeonRun.fetch(dungeonRun);
     expect(state.ofeBuffRoomsLeft).to.equal(1);
@@ -964,9 +878,6 @@ describe("scoundrel", () => {
   });
 
   it("7. Mints accumulated unclaimed_gold into real SPL Gold tokens in the player's Associated Token Account", async () => {
-    const SPL_TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
-    const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
-
     const targetK = findTargetRngState((d) => {
       if (d[0].category !== "monster" || d[1].category !== "monster") return false;
       const sum1 = d[0].rank + d[1].rank;
@@ -976,45 +887,22 @@ describe("scoundrel", () => {
 
     const { player, sessionSigner, dungeonRun } = await startDeterministicRun(targetK);
 
-    // Clear Room 1 and claim High Threat Spoils (+85 Gold)
-    await program.methods
-      .resolveCard(0, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
-    await program.methods
-      .resolveCard(1, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
-    await program.methods
-      .resolveCard(2, false)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
-    await program.methods
-      .claimSpoils(0)
-      .accountsPartial({ signer: sessionSigner.publicKey, dungeonRun })
-      .signers([sessionSigner])
-      .rpc();
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 0, false);
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 1, false);
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 2, false);
+    await claimRoomSpoils(player.publicKey, sessionSigner, dungeonRun, 0);
 
     let state = await program.account.dungeonRun.fetch(dungeonRun);
     expect(state.unclaimedGold).to.equal(85);
 
-    const [goldMint] = PublicKey.findProgramAddressSync(
-      [Buffer.from("scoundrel_gold_mint")],
-      program.programId
-    );
-    const [playerGoldAta] = PublicKey.findProgramAddressSync(
-      [player.publicKey.toBuffer(), SPL_TOKEN_PROGRAM_ID.toBuffer(), goldMint.toBuffer()],
-      ASSOCIATED_TOKEN_PROGRAM_ID
-    );
+    const { goldMint, playerGoldAta } = deriveGoldMintAndAta(player.publicKey);
 
     await program.methods
       .claimGoldTokens()
       .accountsPartial({
         payer: player.publicKey,
         player: player.publicKey,
+        sessionSigner: sessionSigner.publicKey,
         dungeonRun,
         goldMint,
         playerGoldAta,
@@ -1039,6 +927,7 @@ describe("scoundrel", () => {
         .accountsPartial({
           payer: player.publicKey,
           player: player.publicKey,
+          sessionSigner: sessionSigner.publicKey,
           dungeonRun,
           goldMint,
           playerGoldAta,
@@ -1052,5 +941,118 @@ describe("scoundrel", () => {
       expect(String(err)).to.include("NoGoldToClaim");
     }
     expect(duplicateClaimFailed).to.be.true;
+  });
+
+  it("8. Supports popup-free Session Key SPL Gold minting, bounded SPL Token delegate approval, and on-chain Merchant SPL Gold burns", async () => {
+    const targetK = findTargetRngState((d) => {
+      if (d[0].category !== "monster" || d[1].category !== "monster") return false;
+      const sum1 = d[0].rank + d[1].rank;
+      if (sum1 < 15 || sum1 > 17) return false;
+      return d[2].category === "potion" && d[2].rank >= 8;
+    });
+
+    const { player, sessionSigner, dungeonRun } = await startDeterministicRun(targetK);
+    const { goldMint, playerGoldAta } = deriveGoldMintAndAta(player.publicKey);
+
+    // Clear Room 1 and earn +85 Gold
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 0, false);
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 1, false);
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 2, false);
+    await claimRoomSpoils(player.publicKey, sessionSigner, dungeonRun, 0);
+
+    // Mint 85 SPL Gold using ONLY sessionSigner (zero wallet popup!)
+    await program.methods
+      .claimGoldTokens()
+      .accountsPartial({
+        payer: sessionSigner.publicKey,
+        player: player.publicKey,
+        sessionSigner: sessionSigner.publicKey,
+        dungeonRun,
+        goldMint,
+        playerGoldAta,
+        tokenProgram: SPL_TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+      })
+      .signers([sessionSigner])
+      .rpc();
+
+    expect((await provider.connection.getTokenAccountBalance(playerGoldAta)).value.amount).to.equal("85");
+
+    // Without bounded SPL Token delegate approval, sessionSigner cannot burn player's minted SPL Gold
+    let unapprovedBurnBlocked = false;
+    try {
+      await buyMerchantItem(player.publicKey, sessionSigner, dungeonRun, 2); // Epic Potion = 75G
+    } catch (err: any) {
+      unapprovedBurnBlocked = true;
+      expect(String(err)).to.include("MissingTokenDelegateApproval");
+    }
+    expect(unapprovedBurnBlocked).to.be.true;
+
+    // Player approves bounded 500 SPL Gold delegate via prepareSessionVault
+    await program.methods
+      .prepareSessionVault(new BN(500))
+      .accountsPartial({
+        player: player.publicKey,
+        sessionSigner: sessionSigner.publicKey,
+        dungeonRun,
+        goldMint,
+        playerGoldAta,
+        tokenProgram: SPL_TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+      })
+      .signers([player])
+      .rpc();
+
+    // Now sessionSigner purchases Epic Potion (item_id = 2, 75 Gold) on-chain by burning 75 SPL Gold!
+    await buyMerchantItem(player.publicKey, sessionSigner, dungeonRun, 2);
+
+    const state = await program.account.dungeonRun.fetch(dungeonRun);
+    expect(state.epicPotionsInventory).to.equal(1);
+    expect((await provider.connection.getTokenAccountBalance(playerGoldAta)).value.amount).to.equal("10");
+
+    const profile = await program.account.playerProfile.fetch(derivePlayerProfilePda(player.publicKey));
+    expect(profile.totalGoldEarned.toNumber()).to.equal(85);
+    expect(profile.totalGoldMinted.toNumber()).to.equal(85);
+    expect(profile.totalGoldSpent.toNumber()).to.equal(75);
+  });
+
+  it("9. Updates persistent PlayerProfile and global Top-10 Leaderboard PDAs when a run finishes", async () => {
+    // Pick a deck with two heavy barehanded monsters in Room 1 so HP reaches 0 on card 2 (Defeat)
+    const targetK = findTargetRngState((d) => {
+      return (
+        d[0].category === "monster" &&
+        d[0].rank >= 11 &&
+        d[1].category === "monster" &&
+        d[0].rank + d[1].rank >= 21
+      );
+    });
+
+    const { player, sessionSigner, dungeonRun, randomness } = await startDeterministicRun(targetK);
+
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 0, false);
+    await resolveRoomCard(player.publicKey, sessionSigner, dungeonRun, 1, false);
+
+    const endState = await program.account.dungeonRun.fetch(dungeonRun);
+    expect(endState.runStatus).to.equal(2); // RUN_STATUS_DEFEAT
+    expect(endState.score).to.be.lessThan(0);
+
+    const profile = await program.account.playerProfile.fetch(derivePlayerProfilePda(player.publicKey));
+    expect(profile.hasCompletedRun).to.be.true;
+    expect(profile.runsStarted).to.equal(1);
+    expect(profile.defeats).to.equal(1);
+    expect(profile.monstersSlain).to.equal(1);
+    expect(profile.bestScore).to.equal(endState.score);
+    expect(Array.from(profile.lastVrfSeed)).to.deep.equal(randomness);
+
+    const leaderboard = await program.account.leaderboard.fetch(deriveLeaderboardPda());
+    expect(leaderboard.entryCount).to.be.greaterThanOrEqual(1);
+    expect(leaderboard.totalRunsCompleted.toNumber()).to.be.greaterThanOrEqual(1);
+
+    const matchingEntry = leaderboard.entries
+      .slice(0, leaderboard.entryCount)
+      .find((e) => e.player.equals(player.publicKey));
+    expect(matchingEntry).to.not.be.undefined;
+    expect(matchingEntry!.score).to.equal(endState.score);
+    expect(Array.from(matchingEntry!.vrfSeedPrefix)).to.deep.equal(randomness.slice(0, 8));
   });
 });
