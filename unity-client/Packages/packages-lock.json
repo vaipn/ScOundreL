@@ -49,10 +49,12 @@
       "url": "https://packages.unity.com"
     },
     "com.unity.2d.pixel-perfect": {
-      "version": "5.0.3",
+      "version": "5.1.0",
       "depth": 1,
       "source": "registry",
-      "dependencies": {},
+      "dependencies": {
+        "com.unity.modules.imgui": "1.0.0"
+      },
       "url": "https://packages.unity.com"
     },
     "com.unity.2d.psdimporter": {
@@ -144,7 +146,7 @@
       "source": "builtin",
       "dependencies": {
         "com.unity.2d.animation": "10.2.2",
-        "com.unity.2d.pixel-perfect": "5.0.3",
+        "com.unity.2d.pixel-perfect": "5.1.0",
         "com.unity.2d.psdimporter": "9.1.1",
         "com.unity.2d.sprite": "1.0.0",
         "com.unity.2d.spriteshape": "10.0.7",

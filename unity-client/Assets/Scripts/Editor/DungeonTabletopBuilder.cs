@@ -60,13 +60,15 @@ namespace Scoundrel.EditorTools
                 throw new Exception($"Invalid VRF deck or seed length ({unique.Count}, {gm.State.VrfSeed?.Length ?? 0}).");
             }
 
-            // 2. Grant 150 Gold and test buying Ofe Charm (60G) and Rusty Shield (45G)
-            gm.State.UnclaimedGold = 150;
+            // 2. Grant 200 Gold and test buying Ofe Charm (60G), Rusty Shield (45G), and Epic Potion (75G)
+            gm.State.UnclaimedGold = 200;
+            byte startPotions = gm.State.EpicPotionsInventory;
             bool boughtOfe = gm.BuyItem((int)MarketplaceItemId.OfeCharm);
             bool boughtShield = gm.BuyItem((int)MarketplaceItemId.RustyShield);
-            if (!boughtOfe || !boughtShield || gm.State.UnclaimedGold != 45 || gm.State.OfeInventory != 1 || gm.State.RustyShieldInventory != 1)
+            bool boughtPotion = gm.BuyItem((int)MarketplaceItemId.EpicPotion);
+            if (!boughtOfe || !boughtShield || !boughtPotion || gm.State.UnclaimedGold != 20 || gm.State.OfeInventory != 1 || gm.State.RustyShieldInventory != 1 || gm.State.EpicPotionsInventory != startPotions + 1)
             {
-                throw new Exception($"Marketplace purchase mismatch: Gold={gm.State.UnclaimedGold}, Ofe={gm.State.OfeInventory}, Shield={gm.State.RustyShieldInventory}");
+                throw new Exception($"Marketplace purchase mismatch: Gold={gm.State.UnclaimedGold}, Ofe={gm.State.OfeInventory}, Shield={gm.State.RustyShieldInventory}, Potion={gm.State.EpicPotionsInventory}");
             }
 
             // 3. Activate both Ofe and Rusty Shield (3 rooms each)
@@ -77,9 +79,9 @@ namespace Scoundrel.EditorTools
                 throw new Exception($"Marketplace activation mismatch: OfeBuff={gm.State.OfeBuffRoomsLeft}, ShieldBuff={gm.State.RustyShieldBuffRoomsLeft}");
             }
 
-            // 4. Test SPL Gold Minting (claim_gold_tokens) for the remaining 45 UnclaimedGold
+            // 4. Test SPL Gold Minting (claim_gold_tokens) for the remaining 20 UnclaimedGold
             bool minted = gm.TryMintGoldTokens();
-            if (!minted || gm.State.UnclaimedGold != 0 || gm.Bridge.LastKnownMintedGoldBalance < 45)
+            if (!minted || gm.State.UnclaimedGold != 0 || gm.Bridge.LastKnownMintedGoldBalance < 20)
             {
                 throw new Exception($"SPL Gold minting mismatch: minted={minted}, remaining={gm.State.UnclaimedGold}, ataBalance={gm.Bridge.LastKnownMintedGoldBalance}");
             }
@@ -639,21 +641,21 @@ namespace Scoundrel.EditorTools
             CanvasGroup marketBackdropGroup = marketRoot.gameObject.AddComponent<CanvasGroup>();
 
             RectTransform marketModalPanel = CreateAnchoredRect("MarketplaceModalPanel", marketRoot,
-                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(1180f, 680f));
+                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(1360f, 680f));
             Image marketPanelImg = marketModalPanel.gameObject.AddComponent<Image>();
             marketPanelImg.sprite = uiWhiteSprite;
             marketPanelImg.color = new Color(0.072f, 0.102f, 0.158f, 0.99f);
             AddOutline(marketModalPanel.gameObject, new Color(0.95f, 0.76f, 0.28f, 0.88f), 3f);
 
             RectTransform marketGoldPill = CreateAnchoredRect("MarketplaceGoldPill", marketModalPanel,
-                new Vector2(0.5f, 1f), new Vector2(0.5f, 1f), new Vector2(0f, -42f), new Vector2(460f, 44f));
+                new Vector2(0.5f, 1f), new Vector2(0.5f, 1f), new Vector2(0f, -42f), new Vector2(580f, 44f));
             Image marketGoldPillBg = marketGoldPill.gameObject.AddComponent<Image>();
             marketGoldPillBg.sprite = uiWhiteSprite;
             marketGoldPillBg.color = new Color(0.22f, 0.16f, 0.05f, 0.96f);
             AddOutline(marketGoldPill.gameObject, new Color(0.96f, 0.78f, 0.26f, 0.75f), 1.5f);
 
             TextMeshProUGUI marketGoldBalanceText = CreateTMP("MarketplaceGoldBalanceText", marketGoldPill, fontAsset,
-                "AVAILABLE TREASURY: 0 SPL GOLD", 19f, FontStyles.Bold, TextAlignmentOptions.Center,
+                "AVAILABLE TREASURY: 0 RUN + 0 MINTED ATA = 0 GOLD", 17f, FontStyles.Bold, TextAlignmentOptions.Center,
                 new Color(1f, 0.88f, 0.36f, 1f));
             StretchFull(marketGoldBalanceText.rectTransform);
 
@@ -666,7 +668,7 @@ namespace Scoundrel.EditorTools
             marketHeaderTitle.rectTransform.sizeDelta = new Vector2(-80f, 48f);
 
             TextMeshProUGUI marketSubtitle = CreateTMP("MarketplaceSubtitle", marketModalPanel, fontAsset,
-                "Spend Unclaimed SPL Gold on VRF-Seeded 3-Room Consumables • Activate Anytime from Your Rack", 18.5f,
+                "Spend Unclaimed Gold & Minted SPL Tokens • On-Chain VRF Consumables • Activate Anytime from Your Rack", 17.5f,
                 FontStyles.Normal, TextAlignmentOptions.Center, new Color(0.80f, 0.86f, 0.94f, 0.95f));
             marketSubtitle.rectTransform.anchorMin = new Vector2(0f, 1f);
             marketSubtitle.rectTransform.anchorMax = new Vector2(1f, 1f);
@@ -686,7 +688,7 @@ namespace Scoundrel.EditorTools
                 marketModalPanel,
                 fontAsset,
                 uiWhiteSprite,
-                new Vector2(-270f, -58f),
+                new Vector2(-420f, -58f),
                 "YORUBA VANISHING CHARM",
                 "OFE CHARM",
                 "50% MagicBlock VRF chance to vanish and take 0 damage when fighting barehanded.\nLasts for 3 completed rooms once activated.",
@@ -708,7 +710,7 @@ namespace Scoundrel.EditorTools
                 marketModalPanel,
                 fontAsset,
                 uiWhiteSprite,
-                new Vector2(270f, -58f),
+                new Vector2(0f, -58f),
                 "IRONBOUND BUCKLER",
                 "RUSTY SHIELD",
                 "50% MagicBlock VRF chance to block half (-50%) of incoming monster damage (weapon chip or barehanded).\nLasts for 3 completed rooms once activated.",
@@ -724,6 +726,28 @@ namespace Scoundrel.EditorTools
                 out TextMeshProUGUI shieldMerchantOwned,
                 out Button buyShieldBtn,
                 out TextMeshProUGUI buyShieldBtnText);
+
+            CreateMerchantItemCard(
+                "EpicPotionMerchantCard",
+                marketModalPanel,
+                fontAsset,
+                uiWhiteSprite,
+                new Vector2(420f, -58f),
+                "BALATRO ECHO ELIXIR",
+                "EPIC HEALTH ELIXIR",
+                "Grants +1 Epic Potion to your rack. Restores HP and provides a 10% echo heal over the next 3 completed rooms!\nBalatro consumable slot.",
+                "Owned in Rack: x0",
+                "BUY (75 GOLD)",
+                new Color(0.92f, 0.42f, 0.98f, 1f),
+                new Color(0.62f, 0.18f, 0.72f, 1f),
+                new Color(0.78f, 0.26f, 0.88f, 1f),
+                out RectTransform potionMerchantCardRect,
+                out RectTransform potionMerchantVisualHolder,
+                out TextMeshProUGUI potionMerchantTitle,
+                out TextMeshProUGUI potionMerchantDesc,
+                out TextMeshProUGUI potionMerchantOwned,
+                out Button buyPotionBtn,
+                out TextMeshProUGUI buyPotionBtnText);
 
             MarketplaceModalUI marketplaceModal = marketRoot.gameObject.AddComponent<MarketplaceModalUI>();
             marketplaceModal.ConfigureReferences(
@@ -748,6 +772,13 @@ namespace Scoundrel.EditorTools
                 shieldMerchantOwned,
                 buyShieldBtn,
                 buyShieldBtnText,
+                potionMerchantCardRect,
+                potionMerchantVisualHolder,
+                potionMerchantTitle,
+                potionMerchantDesc,
+                potionMerchantOwned,
+                buyPotionBtn,
+                buyPotionBtnText,
                 foilMat);
 
             SpoilsModalUI spoilsModal = spoilsRoot.gameObject.AddComponent<SpoilsModalUI>();
@@ -848,47 +879,63 @@ namespace Scoundrel.EditorTools
             bridgeStatusReadout.rectTransform.anchoredPosition = new Vector2(0f, -134f);
             bridgeStatusReadout.rectTransform.sizeDelta = new Vector2(-80f, 28f);
 
-            // Row 1 Action Buttons: Connect Wallet Adapter, Devnet Burner + Airdrop, Switch Network Mode
+            // Row 1 Action Buttons: Connect Wallet Adapter, Devnet Burner, Switch Mode, Copy Pubkey
             Button connectAdapterBtn = CreateStyledButton("ConnectWalletAdapterButton", walletModalPanel, fontAsset, uiWhiteSprite,
-                new Vector2(0.5f, 0f), new Vector2(-346f, 118f), new Vector2(326f, 56f),
-                "CONNECT WALLET ADAPTER", 17f,
+                new Vector2(0.5f, 0f), new Vector2(-360f, 84f), new Vector2(230f, 44f),
+                "CONNECT WALLET", 16f,
                 new Color(0.28f, 0.22f, 0.68f, 1f),
                 new Color(0.38f, 0.30f, 0.86f, 1f),
                 new Color(0.18f, 0.16f, 0.24f, 0.8f),
                 out TextMeshProUGUI connectAdapterBtnText);
 
             Button devnetBurnerBtn = CreateStyledButton("DevnetBurnerWalletButton", walletModalPanel, fontAsset, uiWhiteSprite,
-                new Vector2(0.5f, 0f), new Vector2(0f, 118f), new Vector2(326f, 56f),
-                "DEVNET BURNER + AIRDROP", 17f,
+                new Vector2(0.5f, 0f), new Vector2(-120f, 84f), new Vector2(230f, 44f),
+                "DEVNET BURNER", 16f,
                 new Color(0.14f, 0.52f, 0.38f, 1f),
                 new Color(0.20f, 0.68f, 0.50f, 1f),
                 new Color(0.16f, 0.20f, 0.18f, 0.8f),
                 out TextMeshProUGUI devnetBurnerBtnText);
 
             Button toggleModeBtn = CreateStyledButton("ToggleNetworkModeButton", walletModalPanel, fontAsset, uiWhiteSprite,
-                new Vector2(0.5f, 0f), new Vector2(346f, 118f), new Vector2(326f, 56f),
-                "SWITCH TO DEVNET LIVE", 17f,
+                new Vector2(0.5f, 0f), new Vector2(120f, 84f), new Vector2(230f, 44f),
+                "SWITCH MODE", 16f,
                 new Color(0.16f, 0.42f, 0.64f, 1f),
                 new Color(0.22f, 0.54f, 0.80f, 1f),
                 new Color(0.16f, 0.18f, 0.22f, 0.8f),
                 out TextMeshProUGUI toggleModeBtnText);
 
-            // Row 2 Action Buttons: Mint SPL Gold to ATA & Copy Wallet Address
+            Button copyAddressBtn = CreateStyledButton("CopyWalletAddressButton", walletModalPanel, fontAsset, uiWhiteSprite,
+                new Vector2(0.5f, 0f), new Vector2(360f, 84f), new Vector2(230f, 44f),
+                "COPY PUBKEY", 16f,
+                new Color(0.24f, 0.30f, 0.40f, 1f),
+                new Color(0.34f, 0.42f, 0.54f, 1f),
+                new Color(0.16f, 0.18f, 0.22f, 0.8f),
+                out TextMeshProUGUI copyAddressBtnText);
+
+            // Row 2 Action Buttons: Start On-Chain VRF Run, Mint SPL Gold to ATA, View on Explorer
+            Button startRunBtn = CreateStyledButton("StartOnChainRunButton", walletModalPanel, fontAsset, uiWhiteSprite,
+                new Vector2(0.5f, 0f), new Vector2(-330f, 28f), new Vector2(290f, 48f),
+                "START ON-CHAIN VRF RUN", 16.5f,
+                new Color(0.10f, 0.52f, 0.56f, 1f),
+                new Color(0.14f, 0.68f, 0.72f, 1f),
+                new Color(0.14f, 0.18f, 0.20f, 0.8f),
+                out TextMeshProUGUI startRunBtnText);
+
             Button mintGoldBtn = CreateStyledButton("MintSplGoldButton", walletModalPanel, fontAsset, uiWhiteSprite,
-                new Vector2(0.5f, 0f), new Vector2(-180f, 48f), new Vector2(460f, 54f),
-                "MINT SPL GOLD TO ATA", 18f,
+                new Vector2(0.5f, 0f), new Vector2(40f, 28f), new Vector2(380f, 48f),
+                "MINT SPL GOLD TO ATA", 17f,
                 new Color(0.76f, 0.52f, 0.12f, 1f),
                 new Color(0.92f, 0.66f, 0.18f, 1f),
                 new Color(0.20f, 0.18f, 0.14f, 0.8f),
                 out TextMeshProUGUI mintGoldBtnText);
 
-            Button copyAddressBtn = CreateStyledButton("CopyWalletAddressButton", walletModalPanel, fontAsset, uiWhiteSprite,
-                new Vector2(0.5f, 0f), new Vector2(260f, 48f), new Vector2(360f, 54f),
-                "COPY WALLET ADDRESS", 17.5f,
-                new Color(0.24f, 0.30f, 0.40f, 1f),
-                new Color(0.34f, 0.42f, 0.54f, 1f),
-                new Color(0.16f, 0.18f, 0.22f, 0.8f),
-                out TextMeshProUGUI copyAddressBtnText);
+            Button viewExplorerBtn = CreateStyledButton("ViewExplorerButton", walletModalPanel, fontAsset, uiWhiteSprite,
+                new Vector2(0.5f, 0f), new Vector2(370f, 28f), new Vector2(220f, 48f),
+                "VIEW ON EXPLORER", 15.5f,
+                new Color(0.34f, 0.24f, 0.62f, 1f),
+                new Color(0.46f, 0.32f, 0.78f, 1f),
+                new Color(0.18f, 0.16f, 0.22f, 0.8f),
+                out TextMeshProUGUI viewExplorerBtnText);
 
             WalletConnectModalUI walletModal = walletRoot.gameObject.AddComponent<WalletConnectModalUI>();
             walletModal.ConfigureReferences(
@@ -912,7 +959,11 @@ namespace Scoundrel.EditorTools
                 mintGoldBtn,
                 mintGoldBtnText,
                 copyAddressBtn,
-                copyAddressBtnText);
+                copyAddressBtnText,
+                viewExplorerBtn,
+                viewExplorerBtnText,
+                startRunBtn,
+                startRunBtnText);
 
             // =====================================================================
             // F. GAME OVER (VICTORY / DEFEAT) MODAL
@@ -1570,7 +1621,7 @@ namespace Scoundrel.EditorTools
             out TextMeshProUGUI buyButtonTextOut)
         {
             cardRectOut = CreateAnchoredRect(name, parent,
-                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), anchoredPos, new Vector2(490f, 468f));
+                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), anchoredPos, new Vector2(390f, 468f));
             Image cardBg = cardRectOut.gameObject.AddComponent<Image>();
             cardBg.sprite = whiteSprite;
             cardBg.color = new Color(0.105f, 0.145f, 0.220f, 0.99f);
