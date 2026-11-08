@@ -1,0 +1,8 @@
+<linker>
+  <assembly fullname="Newtonsoft.Json" preserve="all" />
+  <assembly fullname="Solana.Unity.Rpc" preserve="all" />
+  <assembly fullname="Solana.Unity.Wallet" preserve="all" />
+  <assembly fullname="Solana.Unity.Programs" preserve="all" />
+  <assembly fullname="Solana.Unity.SDK" preserve="all" />
+  <assembly fullname="Solana.Unity.Metaplex" preserve="all" ignoreIfMissing="1" />
+</linker>
