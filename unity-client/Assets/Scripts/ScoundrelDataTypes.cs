@@ -52,7 +52,51 @@ namespace Scoundrel
     public enum MarketplaceItemId : byte
     {
         OfeCharm = 0,
-        RustyShield = 1
+        RustyShield = 1,
+        EpicPotion = 2
+    }
+
+    [Serializable]
+    public class PlayerProfileData
+    {
+        public string PlayerPubkey = string.Empty;
+        public bool HasCompletedRun;
+        public uint RunsStarted;
+        public uint Victories;
+        public uint Defeats;
+        public int BestScore;
+        public uint MonstersSlain;
+        public ulong TotalGoldEarned;
+        public ulong TotalGoldMinted;
+        public ulong TotalGoldSpent;
+        public uint TotalVrfRequests;
+        public ulong TotalVrfCombatRolls;
+        public byte[] LastVrfSeed = new byte[32];
+    }
+
+    [Serializable]
+    public class LeaderboardEntryData
+    {
+        public string PlayerPubkey = string.Empty;
+        public int Score;
+        public ushort HpTenths;
+        public bool Victory;
+        public byte[] VrfSeedPrefix = new byte[8];
+        public long Timestamp;
+
+        public string ShortVrfHex()
+        {
+            if (VrfSeedPrefix == null || VrfSeedPrefix.Length < 4) return "0x0000";
+            return $"0x{VrfSeedPrefix[0]:x2}{VrfSeedPrefix[1]:x2}{VrfSeedPrefix[2]:x2}{VrfSeedPrefix[3]:x2}";
+        }
+    }
+
+    [Serializable]
+    public class LeaderboardData
+    {
+        public byte EntryCount;
+        public ulong TotalRunsCompleted;
+        public List<LeaderboardEntryData> Entries = new List<LeaderboardEntryData>();
     }
 
     [Serializable]
@@ -329,8 +373,10 @@ namespace Scoundrel
 
         public const uint PriceOfeCharm = 60;
         public const uint PriceRustyShield = 45;
+        public const uint PriceEpicPotion = 75;
         public const uint OfeCostGold = PriceOfeCharm;
         public const uint RustyShieldCostGold = PriceRustyShield;
+        public const uint EpicPotionCostGold = PriceEpicPotion;
 
         public uint UnclaimedGold;
         public int Score;
@@ -357,6 +403,40 @@ namespace Scoundrel
             int tenths = HpTenths % 10;
             int maxWhole = MaxHpTenths / 10;
             return $"{whole}.{tenths} / {maxWhole} HP";
+        }
+
+        public bool HasNonZeroVrfSeed()
+        {
+            if (VrfSeed == null || VrfSeed.Length < 32) return false;
+            for (int i = 0; i < 32; i++)
+            {
+                if (VrfSeed[i] != 0) return true;
+            }
+            return false;
+        }
+
+        public string FormatVrfSeedShort()
+        {
+            if (!HasNonZeroVrfSeed()) return "Pending VRF";
+            return $"0x{VrfSeed[0]:x2}{VrfSeed[1]:x2}{VrfSeed[2]:x2}{VrfSeed[3]:x2}..{VrfSeed[28]:x2}{VrfSeed[29]:x2}{VrfSeed[30]:x2}{VrfSeed[31]:x2}";
+        }
+
+        public static uint GetItemPrice(MarketplaceItemId item)
+        {
+            switch (item)
+            {
+                case MarketplaceItemId.OfeCharm: return PriceOfeCharm;
+                case MarketplaceItemId.RustyShield: return PriceRustyShield;
+                case MarketplaceItemId.EpicPotion: return PriceEpicPotion;
+                default: return 999999;
+            }
+        }
+
+        public bool CanAffordItem(MarketplaceItemId item, ulong mintedAtaGold = 0UL)
+        {
+            if (Status != RunStatus.Active) return false;
+            ulong totalAvailable = (ulong)UnclaimedGold + mintedAtaGold;
+            return totalAvailable >= GetItemPrice(item);
         }
 
         public WeaponSkinTier ActiveWeaponSkinTier
